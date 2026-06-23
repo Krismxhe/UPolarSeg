@@ -1,0 +1,11 @@
+# UNet — classic encoder-decoder with skip connections (SMP provider)
+# Supported encoders: resnet18/34/50/101, efficientnet-b0~b7,
+#                     mit_b0~b5, mobilenet_v2, vgg11~19, densenet121 ...
+# Full list: https://smp.readthedocs.io/en/latest/encoders.html
+provider: smp
+name: unet
+arch: Unet
+encoder: resnet34
+encoder_weights: imagenet   # "imagenet" or null (random init)
+in_channels: 3
+params: {}                  # extra arch-specific kwargs for smp.create_model

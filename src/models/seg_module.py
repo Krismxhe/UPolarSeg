@@ -26,6 +26,7 @@ from torchmetrics.classification import (
 )
 
 from src.datasets.batch import unpack_batch
+from src.models.factory import build_model
 
 
 class SegModule(pl.LightningModule):
@@ -48,13 +49,9 @@ class SegModule(pl.LightningModule):
         self._smp_mode        = 'binary' if self._is_binary else 'multiclass'
 
         # ── Model ─────────────────────────────────────────────────────────────
-        self.model = smp.create_model(
-            arch=cfg.model.arch,
-            encoder_name=cfg.model.encoder,
-            encoder_weights=cfg.model.encoder_weights,
-            in_channels=cfg.model.in_channels,
-            classes=self.num_classes,
-        )
+        # Built via the factory so SegModule stays agnostic to the provider
+        # (SMP today; custom TransUNet / ModularUNet in later phases).
+        self.model = build_model(cfg.model, cfg.dataset)
 
         # ── Loss ──────────────────────────────────────────────────────────────
         self.dice_loss = smp.losses.DiceLoss(mode=self._smp_mode, from_logits=True)

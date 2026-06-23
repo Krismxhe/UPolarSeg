@@ -1,0 +1,8 @@
+# UNet++ — nested skip connections, generally outperforms plain UNet (SMP provider)
+provider: smp
+name: unetplusplus
+arch: UnetPlusPlus
+encoder: resnet34
+encoder_weights: imagenet
+in_channels: 3
+params: {}

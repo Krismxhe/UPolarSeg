@@ -63,6 +63,33 @@ def test_build_transforms_returns_compose():
         assert isinstance(tf, A.Compose)
 
 
+def test_build_model_smp_forward_shape():
+    import torch
+
+    from src.models.factory import build_model
+
+    cfg = _compose_cfg()
+    cfg.model.encoder_weights = None  # offline + fast: skip imagenet download
+    model = build_model(cfg.model, cfg.dataset).eval()
+
+    x = torch.randn(2, 3, 128, 128)
+    with torch.no_grad():
+        y = model(x)
+    assert y.shape == (2, cfg.dataset.num_classes, 128, 128)
+
+
+def test_build_model_rejects_unknown_provider():
+    from omegaconf import open_dict
+
+    from src.models.factory import build_model
+
+    cfg = _compose_cfg()
+    with open_dict(cfg.model):
+        cfg.model.provider = "bogus"
+    with pytest.raises(ValueError):
+        build_model(cfg.model, cfg.dataset)
+
+
 def test_unpack_batch_handles_dict_and_tuple():
     import torch
 
