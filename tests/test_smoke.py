@@ -63,6 +63,70 @@ def test_build_transforms_returns_compose():
         assert isinstance(tf, A.Compose)
 
 
+def test_normalize_output_tensor_wraps_without_change():
+    import torch
+
+    from src.models.outputs import normalize_model_output
+
+    t = torch.randn(2, 3, 8, 8)
+    out = normalize_model_output(t)
+    assert set(out.keys()) == {"seg_logits"}
+    # identity: no copy, no dtype/device/shape change
+    assert out["seg_logits"] is t
+
+
+def test_normalize_output_dict_with_seg_logits_passes_through():
+    import torch
+
+    from src.models.outputs import normalize_model_output
+
+    d = {"seg_logits": torch.randn(2, 1, 4, 4), "boundary_logits": torch.randn(2, 1, 4, 4)}
+    out = normalize_model_output(d)
+    assert out is d  # passed through untouched
+
+
+def test_normalize_output_dict_missing_seg_logits_raises():
+    import torch
+
+    from src.models.outputs import normalize_model_output
+
+    with pytest.raises(ValueError):
+        normalize_model_output({"boundary_logits": torch.randn(2, 1, 4, 4)})
+
+
+def test_normalize_output_rejects_tuple_and_list():
+    import torch
+
+    from src.models.outputs import normalize_model_output
+
+    t = torch.randn(2, 1, 4, 4)
+    with pytest.raises(TypeError):
+        normalize_model_output((t,))
+    with pytest.raises(TypeError):
+        normalize_model_output([t])
+
+
+def test_segmodule_model_output_normalizes_to_seg_logits():
+    """Old SMP models return a tensor → contract still yields seg_logits unchanged."""
+    import torch
+
+    from src.models.outputs import normalize_model_output
+    from src.models.seg_module import SegModule
+
+    cfg = _compose_cfg()
+    cfg.model.encoder_weights = None  # offline + fast
+    cfg.train.img_size = 64
+    module = SegModule(cfg).eval()
+
+    x = torch.randn(2, 3, 64, 64)
+    with torch.no_grad():
+        raw = module(x)
+        out = normalize_model_output(raw)
+    assert isinstance(raw, torch.Tensor)  # SMP baseline still returns a tensor
+    assert out["seg_logits"] is raw
+    assert out["seg_logits"].shape == (2, cfg.dataset.num_classes, 64, 64)
+
+
 def test_build_model_smp_forward_shape():
     import torch
 

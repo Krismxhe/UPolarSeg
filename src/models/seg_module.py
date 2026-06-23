@@ -27,6 +27,7 @@ from torchmetrics.classification import (
 
 from src.datasets.batch import unpack_batch
 from src.models.factory import build_model
+from src.models.outputs import normalize_model_output
 
 
 class SegModule(pl.LightningModule):
@@ -114,7 +115,8 @@ class SegModule(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, masks, _meta = unpack_batch(batch)
-        logits = self(images)
+        outputs = normalize_model_output(self(images))
+        logits = outputs['seg_logits']
         loss, loss_dice, loss_aux = self._loss(logits, masks)
 
         self.log('train/loss',      loss,      on_step=True,  on_epoch=True, prog_bar=True, sync_dist=True)
@@ -124,7 +126,8 @@ class SegModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         images, masks, _meta = unpack_batch(batch)
-        logits = self(images)
+        outputs = normalize_model_output(self(images))
+        logits = outputs['seg_logits']
         loss, _, _ = self._loss(logits, masks)
         preds = self._predict(logits)
 
@@ -137,7 +140,8 @@ class SegModule(pl.LightningModule):
 
     def test_step(self, batch, batch_idx):
         images, masks, _meta = unpack_batch(batch)
-        logits = self(images)
+        outputs = normalize_model_output(self(images))
+        logits = outputs['seg_logits']
         preds = self._predict(logits)
         self.test_dice.update(preds, masks)
         self.test_iou.update(preds, masks)
