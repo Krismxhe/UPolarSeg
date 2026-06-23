@@ -1,0 +1,5 @@
+# Dice + BCEWithLogits loss (binary segmentation, num_classes == 1)
+name: dice_bce
+dice_weight: 1.0
+bce_weight: 1.0
+from_logits: true

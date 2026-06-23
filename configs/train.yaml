@@ -8,6 +8,7 @@ defaults:
   - dataset: multiclass
   - augmentation: medium
   - optimizer: adamw
+  - loss: dice_ce
   - _self_
 
 # ── Training hyper-parameters ─────────────────────────────────────────────────

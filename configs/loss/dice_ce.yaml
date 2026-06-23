@@ -1,0 +1,5 @@
+# Dice + CrossEntropy loss (multiclass segmentation, num_classes > 1)
+name: dice_ce
+dice_weight: 1.0
+ce_weight: 1.0
+from_logits: true

@@ -6,9 +6,9 @@ Supports:
   - Multi-class segmentation (num_classes > 1, mask_mode = "index")
 
 Loss:
-  - Dice loss  (segmentation_models_pytorch)
-  - CE / BCE   (torch.nn)
-  Total = Dice + CE
+  - Built via src.losses.factory.build_loss(cfg.loss, cfg.dataset).
+  - Default: Dice + CrossEntropy (multiclass) / Dice + BCE (binary).
+  - SegModule itself has no direct segmentation-models-pytorch dependency.
 
 Metrics (per-class and mean, foreground only):
   - Dice (F1)
@@ -16,9 +16,7 @@ Metrics (per-class and mean, foreground only):
 """
 
 import torch
-import torch.nn as nn
 import pytorch_lightning as pl
-import segmentation_models_pytorch as smp
 from omegaconf import DictConfig, OmegaConf
 from torchmetrics.classification import (
     BinaryF1Score, MulticlassF1Score,
@@ -26,6 +24,7 @@ from torchmetrics.classification import (
 )
 
 from src.datasets.batch import unpack_batch
+from src.losses.factory import build_loss
 from src.models.factory import build_model
 from src.models.outputs import normalize_model_output
 
@@ -47,7 +46,6 @@ class SegModule(pl.LightningModule):
         self.foreground_ids   = list(cfg.dataset.foreground_classes)
         self.class_names      = list(cfg.dataset.class_names)
         self._is_binary       = (self.num_classes == 1)
-        self._smp_mode        = 'binary' if self._is_binary else 'multiclass'
 
         # ── Model ─────────────────────────────────────────────────────────────
         # Built via the factory so SegModule stays agnostic to the provider
@@ -55,11 +53,10 @@ class SegModule(pl.LightningModule):
         self.model = build_model(cfg.model, cfg.dataset)
 
         # ── Loss ──────────────────────────────────────────────────────────────
-        self.dice_loss = smp.losses.DiceLoss(mode=self._smp_mode, from_logits=True)
-        if self._is_binary:
-            self.aux_loss = nn.BCEWithLogitsLoss()
-        else:
-            self.aux_loss = nn.CrossEntropyLoss()
+        # Built via the loss factory; SegModule no longer depends on smp directly.
+        # cfg.get('loss', None) → None falls back to the previous default loss,
+        # keeping checkpoints saved before the loss config was introduced working.
+        self.loss = build_loss(cfg.get('loss', None), cfg.dataset)
 
         # ── Metrics ───────────────────────────────────────────────────────────
         # torchmetrics >= 1.0 API
@@ -92,16 +89,11 @@ class SegModule(pl.LightningModule):
         """
         logits : B × C × H × W  (C=1 for binary)
         masks  : B × H × W  (long, class indices)
+
+        Returns (total, dice, aux); the binary/multiclass handling lives inside
+        the loss module built by build_loss(...).
         """
-        loss_dice = self.dice_loss(logits, masks)
-
-        if self._is_binary:
-            # BCEWithLogitsLoss expects float targets of the same shape as logits
-            loss_aux = self.aux_loss(logits.squeeze(1).float(), masks.float())
-        else:
-            loss_aux = self.aux_loss(logits, masks)
-
-        return loss_dice + loss_aux, loss_dice, loss_aux
+        return self.loss(logits, masks)
 
     # ── Prediction helper ─────────────────────────────────────────────────────
 

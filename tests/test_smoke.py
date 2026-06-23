@@ -63,6 +63,62 @@ def test_build_transforms_returns_compose():
         assert isinstance(tf, A.Compose)
 
 
+def test_config_includes_loss_group():
+    cfg = _compose_cfg()
+    assert cfg.loss.name == "dice_ce"
+
+
+def test_build_loss_multiclass_returns_three_terms():
+    import torch
+
+    from src.losses.factory import build_loss
+
+    cfg = _compose_cfg()  # multiclass dataset, loss=dice_ce
+    loss_fn = build_loss(cfg.loss, cfg.dataset)
+
+    logits = torch.randn(2, cfg.dataset.num_classes, 16, 16, requires_grad=True)
+    targets = torch.randint(0, cfg.dataset.num_classes, (2, 16, 16))
+    total, dice, aux = loss_fn(logits, targets)
+    assert total.ndim == 0 and total.requires_grad
+    # default weights are 1.0 → total == dice + aux (old semantics preserved)
+    assert torch.allclose(total, dice + aux)
+
+
+def test_build_loss_fallback_when_cfg_missing():
+    """No loss config (e.g. old checkpoint) → backward-compatible default."""
+    import torch
+
+    from src.losses.factory import build_loss
+
+    cfg = _compose_cfg()
+    loss_fn = build_loss(None, cfg.dataset)  # fallback path
+    logits = torch.randn(2, cfg.dataset.num_classes, 8, 8)
+    targets = torch.randint(0, cfg.dataset.num_classes, (2, 8, 8))
+    total, dice, aux = loss_fn(logits, targets)
+    assert torch.allclose(total, dice + aux)
+
+
+def test_build_loss_rejects_task_mismatch():
+    from omegaconf import OmegaConf
+
+    from src.losses.factory import build_loss
+
+    cfg = _compose_cfg()  # multiclass dataset
+    # dice_bce on a multiclass task must fail clearly
+    bce_cfg = OmegaConf.create({"name": "dice_bce"})
+    with pytest.raises(ValueError):
+        build_loss(bce_cfg, cfg.dataset)
+
+
+def test_segmodule_has_no_smp_import():
+    """Phase 3: SegModule must not import segmentation_models_pytorch."""
+    import src.models.seg_module as seg_module
+
+    assert not hasattr(seg_module, "smp")
+    src_text = Path(seg_module.__file__).read_text()
+    assert "import segmentation_models_pytorch" not in src_text
+
+
 def test_normalize_output_tensor_wraps_without_change():
     import torch
 
