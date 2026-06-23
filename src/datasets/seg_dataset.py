@@ -57,8 +57,17 @@ class SegDataset(Dataset):
         # mask has the same stem as the image, always stored as .png
         mask_path = self.mask_dir / (img_path.stem + '.png')
 
+        if not mask_path.exists():
+            raise FileNotFoundError(
+                f"Mask not found for image '{img_path.name}': expected '{mask_path}'"
+            )
+
         image = np.array(Image.open(img_path).convert('RGB'))
         mask  = np.array(Image.open(mask_path))
+
+        # Record original spatial size (H, W) BEFORE any resizing transform,
+        # so downstream evaluation can restore predictions to native resolution.
+        orig_h, orig_w = image.shape[:2]
 
         if self.mask_mode == 'binary':
             mask = (mask > 127).astype(np.uint8)
@@ -68,7 +77,14 @@ class SegDataset(Dataset):
             image = augmented['image']   # C×H×W float32 tensor (via ToTensorV2)
             mask  = augmented['mask']    # H×W uint8 tensor
 
-        return image, mask.long()
+        return {
+            'image': image,
+            'mask': mask.long(),
+            'case_id': img_path.stem,
+            'image_path': str(img_path),
+            'mask_path': str(mask_path),
+            'orig_size': (int(orig_h), int(orig_w)),
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

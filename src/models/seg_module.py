@@ -25,6 +25,8 @@ from torchmetrics.classification import (
     BinaryJaccardIndex, MulticlassJaccardIndex,
 )
 
+from src.datasets.batch import unpack_batch
+
 
 class SegModule(pl.LightningModule):
 
@@ -114,7 +116,7 @@ class SegModule(pl.LightningModule):
     # ── Steps ─────────────────────────────────────────────────────────────────
 
     def training_step(self, batch, batch_idx):
-        images, masks = batch
+        images, masks, _meta = unpack_batch(batch)
         logits = self(images)
         loss, loss_dice, loss_aux = self._loss(logits, masks)
 
@@ -124,7 +126,7 @@ class SegModule(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        images, masks = batch
+        images, masks, _meta = unpack_batch(batch)
         logits = self(images)
         loss, _, _ = self._loss(logits, masks)
         preds = self._predict(logits)
@@ -137,7 +139,7 @@ class SegModule(pl.LightningModule):
         self._log_metrics('val', self.val_dice, self.val_iou)
 
     def test_step(self, batch, batch_idx):
-        images, masks = batch
+        images, masks, _meta = unpack_batch(batch)
         logits = self(images)
         preds = self._predict(logits)
         self.test_dice.update(preds, masks)
