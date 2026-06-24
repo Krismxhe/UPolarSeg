@@ -9,6 +9,7 @@ defaults:
   - augmentation: medium
   - optimizer: adamw
   - loss: dice_ce
+  - task: default
   - _self_
 
 # ── Training hyper-parameters ─────────────────────────────────────────────────
@@ -57,3 +58,14 @@ eval:
   output_dir: null          # default: <save_dir>/<logging.name>/eval/<split>
   per_case: true
   per_class: true
+
+# ── Multi-task model knobs (Phase 9b; merged into the selected model config) ──
+# All OFF by default. Consumed by future custom models that expose decoder
+# features / heads; SMP baselines ignore them, so the baseline is unaffected.
+model:
+  return_features: false
+  heads:
+    boundary:
+      enabled: false
+    clinical:
+      enabled: false

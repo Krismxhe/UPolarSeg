@@ -1,0 +1,23 @@
+# ── Multi-task output spec (Phase 9b) ─────────────────────────────────────────
+# All optional tasks default OFF: the segmentation baseline is unaffected.
+#   - segmentation : always on (primary output, seg_logits)
+#   - boundary     : eval-level boundary metrics (and future BoundaryHead training)
+#   - clinical     : eval-level deterministic morphology metrics
+outputs:
+  segmentation:
+    enabled: true
+    key: seg_logits
+  boundary:
+    enabled: false
+    key: boundary_logits
+    source: decoder_final_feature
+    target_type: binary_boundary
+    boundary_width_px: 3
+  clinical:
+    enabled: false
+    mode: deterministic_from_prediction
+    source: pred_mask
+    metrics:
+      - area
+      - perimeter
+      - area_ratio

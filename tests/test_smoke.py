@@ -142,6 +142,136 @@ def test_evaluator_writes_three_csvs(tmp_path):
     assert len(per_class) == cfg.dataset.num_classes
 
 
+def test_morphology_basic():
+    import torch
+
+    from src.metrics.morphology import area, area_ratio, perimeter
+
+    m = torch.zeros(4, 4, dtype=torch.long)
+    m[0:2, 0:2] = 1
+    assert area(m == 1) == 4.0
+    assert perimeter(m == 1) == 4.0          # all 4 block pixels touch background
+    assert area_ratio(m == 1) == 0.25        # 4 / 16
+    # empty mask is stable (no NaN, zero metrics)
+    assert area(m == 5) == 0.0 and perimeter(m == 5) == 0.0
+
+
+def test_mask_to_boundary_and_boundary_scores():
+    import numpy as np
+    import torch
+
+    from src.metrics.boundary_metrics import boundary_scores
+    from src.utils.geometry import mask_to_boundary
+
+    solid = torch.ones(6, 6, dtype=torch.long)
+    band = mask_to_boundary(solid, width_px=1)
+    assert band.dtype == np.bool_ and band.any() and not band.all()
+
+    # identical masks → perfect boundary overlap; empty/empty → 1 (no NaN)
+    s = boundary_scores(solid, solid, width_px=1)
+    assert s["boundary_dice"] == 1.0 and s["boundary_iou"] == 1.0
+    z = torch.zeros(6, 6, dtype=torch.long)
+    s0 = boundary_scores(z, z, width_px=1)
+    assert s0["boundary_dice"] == 1.0
+
+
+def test_clinical_metrics_unit_is_pixel():
+    import torch
+
+    from src.metrics.clinical_metrics import PIXEL_UNIT, compute_class_clinical
+
+    assert PIXEL_UNIT == "pixel"
+    m = torch.zeros(4, 4, dtype=torch.long)
+    m[0, 0] = 1
+    out = compute_class_clinical(m == 1, ["area", "perimeter", "area_ratio"], total_pixels=16)
+    assert out["area"] == 1.0 and out["area_ratio"] == 1 / 16
+
+
+def test_heads_forward_shapes():
+    import torch
+
+    from src.models.heads import BoundaryHead, ClinicalHead
+
+    feat = torch.randn(2, 8, 16, 16)
+    assert BoundaryHead(8, 1)(feat).shape == (2, 1, 16, 16)
+    assert ClinicalHead(8, 3)(feat).shape == (2, 3)
+
+
+def test_multitask_loss_seg_only_equals_seg_loss():
+    import torch
+
+    from src.losses.factory import build_loss
+    from src.losses.multitask_loss import MultiTaskLoss
+
+    cfg = _compose_cfg()
+    seg_loss = build_loss(cfg.loss, cfg.dataset)
+    mtl = MultiTaskLoss(seg_loss)  # boundary disabled by default
+
+    logits = torch.randn(2, cfg.dataset.num_classes, 16, 16)
+    targets = {"mask": torch.randint(0, cfg.dataset.num_classes, (2, 16, 16))}
+    total, components = mtl({"seg_logits": logits}, targets)
+    assert torch.allclose(total, components["seg_total"])  # seg-only → identical
+
+
+def test_tasks_disabled_by_default():
+    from src.tasks import is_task_enabled
+
+    cfg = _compose_cfg()
+    assert is_task_enabled(cfg, "segmentation") is True
+    assert is_task_enabled(cfg, "boundary") is False
+    assert is_task_enabled(cfg, "clinical") is False
+
+
+def test_evaluator_clinical_boundary_csvs(tmp_path):
+    from omegaconf import open_dict
+
+    from src.metrics.evaluator import SegEvaluator
+
+    cfg = _compose_cfg()  # 3 classes, foreground [1, 2]
+    with open_dict(cfg):
+        cfg.task.outputs.clinical.enabled = True
+        cfg.task.outputs.boundary.enabled = True
+
+    def rec(case_id):
+        per_class = {c: {"dice": 1.0, "iou": 1.0, "precision": 1.0,
+                         "recall": 1.0, "support": 10.0} for c in range(3)}
+        clinical = {"unit": "pixel", "per_class": {
+            1: {"area": 5.0, "perimeter": 4.0, "area_ratio": 0.1},
+            2: {"area": 3.0, "perimeter": 3.0, "area_ratio": 0.05}}}
+        boundary = {"width_px": 3, "per_class": {
+            1: {"boundary_dice": 0.8, "boundary_iou": 0.6},
+            2: {"boundary_dice": 0.7, "boundary_iou": 0.5}}}
+        return {"case_id": case_id, "image_path": "", "mask_path": "", "pred_path": "",
+                "per_class": per_class, "clinical": clinical, "boundary": boundary}
+
+    records = [rec("a"), rec("b")]
+    written = SegEvaluator(cfg, split="test", run_name="unit").write(records, tmp_path)
+
+    # core CSVs still present
+    for name in ("summary", "per_class", "per_case"):
+        assert Path(written[name]).is_file()
+    # extra CSVs present and one row per case
+    import csv as _csv
+    for name in ("clinical", "boundary"):
+        assert Path(written[name]).is_file()
+    with open(written["clinical"]) as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 2 and rows[0]["unit"] == "pixel"
+    assert "area_class_a" in rows[0]
+
+
+def test_evaluator_no_extra_csv_when_disabled(tmp_path):
+    from src.metrics.evaluator import SegEvaluator
+
+    cfg = _compose_cfg()  # tasks default OFF
+    rec = {"case_id": "a", "image_path": "", "mask_path": "", "pred_path": "",
+           "per_class": {c: {"dice": 1.0, "iou": 1.0, "precision": 1.0,
+                             "recall": 1.0, "support": 1.0} for c in range(3)}}
+    written = SegEvaluator(cfg, split="test", run_name="unit").write([rec], tmp_path)
+    assert "clinical" not in written and "boundary" not in written
+    assert not (tmp_path / "clinical_metrics.csv").exists()
+
+
 def test_config_includes_loss_group():
     cfg = _compose_cfg()
     assert cfg.loss.name == "dice_ce"

@@ -82,6 +82,15 @@ class SegModule(pl.LightningModule):
         # to write explicit summary/per_class/per_case CSV (Phase 4).
         self.test_records = []
 
+        # Optional multi-task eval outputs (Phase 9b); default OFF so the
+        # segmentation baseline is unaffected.
+        from src.tasks import get_output_cfg, is_task_enabled
+        self._clinical_enabled = is_task_enabled(cfg, 'clinical')
+        self._boundary_enabled = is_task_enabled(cfg, 'boundary')
+        self._clinical_metrics = list(get_output_cfg(cfg, 'clinical').get(
+            'metrics', ['area', 'perimeter', 'area_ratio']))
+        self._boundary_width = int(get_output_cfg(cfg, 'boundary').get('boundary_width_px', 3))
+
     # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(self, x):
@@ -176,17 +185,45 @@ class SegModule(pl.LightningModule):
             rec_preds = preds
             class_values = list(range(self.num_classes))
 
+        # Foreground (class_value, class_name) pairs for optional task metrics.
+        if self._is_binary:
+            fg_classes = [(1, self.class_names[0])]
+        else:
+            fg_classes = [(int(c), self.class_names[int(c)]) for c in self.foreground_ids]
+
         for b in range(rec_preds.shape[0]):
-            per_class = case_class_metrics(
-                rec_preds[b].cpu(), masks[b].cpu(), class_values
-            )
-            self.test_records.append({
+            pred_b = rec_preds[b].cpu()
+            mask_b = masks[b].cpu()
+            per_class = case_class_metrics(pred_b, mask_b, class_values)
+            record = {
                 'case_id':    self._meta_get(meta, 'case_id',    b, f'case_{batch_idx}_{b}'),
                 'image_path': self._meta_get(meta, 'image_path', b, ''),
                 'mask_path':  self._meta_get(meta, 'mask_path',  b, ''),
                 'pred_path':  '',
                 'per_class':  per_class,
-            })
+            }
+            if self._clinical_enabled:
+                record['clinical'] = self._case_clinical(pred_b, fg_classes)
+            if self._boundary_enabled:
+                record['boundary'] = self._case_boundary(pred_b, mask_b, fg_classes)
+            self.test_records.append(record)
+
+    def _case_clinical(self, pred_b, fg_classes):
+        from src.metrics.clinical_metrics import PIXEL_UNIT, compute_class_clinical
+        total_pixels = int(pred_b.numel())
+        per_class = {
+            value: compute_class_clinical(pred_b == value, self._clinical_metrics, total_pixels)
+            for value, _ in fg_classes
+        }
+        return {'unit': PIXEL_UNIT, 'per_class': per_class}
+
+    def _case_boundary(self, pred_b, mask_b, fg_classes):
+        from src.metrics.boundary_metrics import boundary_scores
+        per_class = {
+            value: boundary_scores(pred_b == value, mask_b == value, width_px=self._boundary_width)
+            for value, _ in fg_classes
+        }
+        return {'width_px': self._boundary_width, 'per_class': per_class}
 
     # ── Metric logging helper ─────────────────────────────────────────────────
 

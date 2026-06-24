@@ -74,6 +74,13 @@ class SegEvaluator:
         self.class_specs = self._build_class_specs(ds)
         self._extra_writers: List[Callable[[List[dict], object], None]] = []
 
+        # Optional multi-task CSVs (Phase 9b); default OFF.
+        from src.tasks import get_output_cfg, is_task_enabled
+        self.clinical_enabled = is_task_enabled(cfg, "clinical")
+        self.boundary_enabled = is_task_enabled(cfg, "boundary")
+        self.clinical_metrics = list(get_output_cfg(cfg, "clinical").get(
+            "metrics", ["area", "perimeter", "area_ratio"]))
+
     # ── Extension point for Phase 9b ──────────────────────────────────────────
     def register_writer(self, writer: Callable[[List[dict], object], None]) -> None:
         """Register a callable ``writer(records, output_dir)`` invoked by ``write``."""
@@ -103,6 +110,10 @@ class SegEvaluator:
         if self.include_background:
             return [c["class_id"] for c in self.class_specs]
         return [c["class_id"] for c in self.class_specs if c["foreground"]]
+
+    @property
+    def _foreground_specs(self) -> List[dict]:
+        return [c for c in self.class_specs if c["foreground"]]
 
     # ── Row builders ───────────────────────────────────────────────────────────
     def _per_case_row(self, rec: dict) -> dict:
@@ -181,6 +192,59 @@ class SegEvaluator:
             )
         written["config"] = str(write_resolved_config(out / "config.yaml", self.cfg))
 
+        # Optional multi-task CSVs (Phase 9b) — only when enabled AND the records
+        # carry the corresponding fields. The core CSVs above are never affected.
+        if self.clinical_enabled and records and "clinical" in records[0]:
+            written["clinical"] = str(self._write_clinical(records, out))
+        if self.boundary_enabled and records and "boundary" in records[0]:
+            written["boundary"] = str(self._write_boundary(records, out))
+
         for writer in self._extra_writers:
             writer(records, out)
         return written
+
+    # ── Optional multi-task writers (Phase 9b) ────────────────────────────────
+    def _write_clinical(self, records: List[dict], out):
+        fg = self._foreground_specs
+        fields = ["run_name", "split", "case_id", "image_path", "mask_path", "unit"]
+        fields += [f"{m}_{s['class_name']}" for s in fg for m in self.clinical_metrics]
+        rows = []
+        for r in records:
+            clinical = r["clinical"]
+            row = {
+                "run_name": self.run_name, "split": self.split,
+                "case_id": r.get("case_id", ""), "image_path": r.get("image_path", ""),
+                "mask_path": r.get("mask_path", ""), "unit": clinical.get("unit", "pixel"),
+            }
+            for s in fg:
+                vals = clinical["per_class"][s["class_id"]]
+                for m in self.clinical_metrics:
+                    row[f"{m}_{s['class_name']}"] = round(float(vals[m]), 6)
+            rows.append(row)
+        return write_csv(out / "clinical_metrics.csv", rows, fields)
+
+    def _write_boundary(self, records: List[dict], out):
+        fg = self._foreground_specs
+        fields = ["run_name", "split", "case_id", "image_path", "mask_path", "boundary_width_px"]
+        fields += [f"boundary_{m}_{s['class_name']}" for s in fg for m in ("dice", "iou")]
+        fields += ["boundary_dice_mean", "boundary_iou_mean"]
+        rows = []
+        for r in records:
+            boundary = r["boundary"]
+            row = {
+                "run_name": self.run_name, "split": self.split,
+                "case_id": r.get("case_id", ""), "image_path": r.get("image_path", ""),
+                "mask_path": r.get("mask_path", ""),
+                "boundary_width_px": boundary.get("width_px", ""),
+            }
+            dices, ious = [], []
+            for s in fg:
+                vals = boundary["per_class"][s["class_id"]]
+                row[f"boundary_dice_{s['class_name']}"] = round(float(vals["boundary_dice"]), 6)
+                row[f"boundary_iou_{s['class_name']}"] = round(float(vals["boundary_iou"]), 6)
+                dices.append(vals["boundary_dice"])
+                ious.append(vals["boundary_iou"])
+            row["boundary_dice_mean"] = round(_mean(dices), 6)
+            row["boundary_iou_mean"] = round(_mean(ious), 6)
+            rows.append(row)
+        return write_csv(out / "boundary_metrics.csv", rows, fields)
