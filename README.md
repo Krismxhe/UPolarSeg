@@ -6,7 +6,7 @@ Built on [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentatio
 **Key features**
 
 - **Config-driven**: swap model / backbone / loss / optimizer / augmentation from the command line — no code changes.
-- **Pluggable model providers**: SMP baselines and a custom `ModularUNet` through a single `build_model` factory. (TransUNet is *planned* — see the status table below.)
+- **Pluggable model providers**: SMP baselines, a custom `ModularUNet`, and a hybrid CNN+ViT `TransUNet` baseline through a single `build_model` factory.
 - **Multi-class & binary segmentation** through one code path.
 - **Explicit evaluation CSV**: `summary.csv` / `per_class.csv` / `per_case.csv` written on every `evaluate.py` run (not just TensorBoard).
 - **Unified model output contract**: models may return a logits tensor or a dict; `normalize_model_output` handles both.
@@ -28,7 +28,8 @@ Built on [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentatio
 | Boundary eval metrics (`boundary_metrics.csv`) | ✅ implemented (derived from the seg prediction) |
 | `BoundaryHead` / `ClinicalHead`, `MultiTaskLoss` | 🟡 skeleton — present but **not wired** into training |
 | Extra skip modules (scse, cbam, …) | 🟡 planned — registry ready, only `identity` shipped |
-| **TransUNet** (`model=custom/transunet`) | ⛔ **planned / not implemented** — the command will error today |
+| **TransUNet** (`model=custom/transunet`) | ✅ implemented (hybrid resnet50 + ViT, self-contained) |
+| TransUNet official `.npz` pretrained loading | ⛔ planned — only a partial torch `state_dict` load is supported |
 | Physical-unit (mm/mm²) clinical metrics | ⛔ planned — only pixel units are computed |
 | DDP-safe per-case CSV merge | ⛔ planned — CSV export is single-process |
 
@@ -103,17 +104,23 @@ python train.py model=custom/modular_unet model.skip.name=identity
 
 > `model.img_size` must be divisible by 32 (resnet-style 5-stage encoder).
 
-### TransUNet — ⛔ planned (not implemented)
+### TransUNet (custom, hybrid CNN + ViT)
 
-TransUNet is **not** implemented yet: there is no `configs/model/custom/transunet.yaml`
-and the factory has no `transunet` branch, so the command below will currently
-**fail** (Hydra cannot find the config group). It is documented here only as the
-target API for Phase 5:
+A self-contained hybrid baseline: an SMP ResNet50 backbone feeds its stride-16
+feature map to a ViT transformer encoder, then a cascaded decoder with CNN skip
+connections restores full resolution.
 
 ```bash
-# PLANNED — not functional yet
 python train.py model=custom/transunet train.img_size=224
 ```
+
+> `img_size` must be divisible by `patch_size` (16); the effective patch grid is
+> the ResNet stride-16 grid, so `patch_size=16` is the supported setting.
+> **Pretrained loading is partial**: the CNN backbone can be ImageNet-initialised
+> via `model.encoder_weights`, and `model.pretrained_path` accepts a torch
+> `state_dict` of *this* model (loaded with `strict=False`). The official Google
+> ViT/R50 `.npz` weights are **not** supported. So the transformer trains from
+> scratch unless you supply a compatible torch checkpoint.
 
 ---
 
@@ -139,8 +146,10 @@ params: {}             # extra kwargs forwarded to smp.create_model
   `python train.py model=unet` is unchanged.
 - The new `configs/model/smp/*.yaml` are the preferred namespace going forward
   (`model=smp/unet`). Custom models live under `configs/model/custom/`.
-- Any custom model config must include an `arch` label field because the run name
-  is `logging.name = ${model.arch}_${model.encoder}_${dataset.name}`.
+- Any custom model config must include `arch` **and** `encoder` label fields
+  because the run name is `logging.name = ${model.arch}_${model.encoder}_${dataset.name}`
+  (e.g. ModularUNet and TransUNet configs set these labels even though the build
+  keys off `name` / `vit_name`).
 
 ---
 
@@ -344,7 +353,7 @@ Produces a side-by-side input / colour-coded prediction visualisation.
 1. Implement the model under `src/models/<new_model>/` (a `torch.nn.Module`).
 2. Register it in `src/models/factory.py` under `provider == "custom"` (dispatch on `name`).
 3. Add `configs/model/custom/<new_model>.yaml` with `provider: custom`, `name: <new_model>`,
-   and an `arch:` label (used by `logging.name`).
+   and `arch:` + `encoder:` label fields (used by `logging.name`).
 4. Ensure `forward` returns logits `B×C×H×W` **or** a dict containing `"seg_logits"`
    (both are handled by `normalize_model_output`).
 5. Add a forward-shape test (see `tests/test_smoke.py::test_modular_unet_identity_forward_shape`).
