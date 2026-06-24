@@ -14,8 +14,8 @@ bookkeeping follows the usual SMP UNet convention:
 
 import torch.nn as nn
 
-from src.models.modular_unet.blocks import DecoderBlock
-from src.models.modular_unet.skip_modules import build_skip_module
+from src.models.research.modular_unet.blocks import DecoderBlock
+from src.models.research.modular_unet.skip_modules import build_skip_module
 
 
 class ModularUnetDecoder(nn.Module):

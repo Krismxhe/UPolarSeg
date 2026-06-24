@@ -14,8 +14,8 @@ evaluation are unchanged.
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.modular_unet.decoder import ModularUnetDecoder
-from src.models.modular_unet.encoder import build_encoder
+from src.models.research.modular_unet.decoder import ModularUnetDecoder
+from src.models.research.modular_unet.encoder import build_encoder
 
 
 class ModularUNet(nn.Module):

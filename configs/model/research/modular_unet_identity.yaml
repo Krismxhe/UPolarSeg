@@ -1,0 +1,16 @@
+# ModularUNet with the identity skip module (baseline / ablation control).
+# Research layer (provider=research). Run with: model=research/modular_unet_identity
+# Identity skip = standard UNet skip (passthrough); the control point for
+# skip-module ablations once more modules (scse, cbam, …) are registered.
+provider: research
+name: modular_unet
+arch: ModularUNet         # display label for logging.name / eval CSV (build keys off `name`)
+encoder: resnet34
+encoder_weights: imagenet
+in_channels: 3
+decoder_channels: [256, 128, 64, 32, 16]
+skip:
+  name: identity
+  placement: before_concat
+  levels: all
+  params: {}

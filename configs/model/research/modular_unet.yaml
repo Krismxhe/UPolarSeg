@@ -1,13 +1,7 @@
 # ModularUNet — controllable UNet for skip-connection module research.
-#
-# DEPRECATED compatibility config. ModularUNet now lives in the research layer;
-# prefer `model=research/modular_unet` (or `model=research/modular_unet_identity`).
-# provider=custom is a deprecated alias that routes custom/modular_unet → the
-# research registry (see src/models/factory.py). This file is kept so old
-# `model=custom/modular_unet` commands keep working.
-#
+# Research layer (provider=research). Run with: model=research/modular_unet
 # SMP encoder backbone + custom decoder with configurable skip fusion.
-provider: custom
+provider: research
 name: modular_unet
 arch: ModularUNet         # display label for logging.name / eval CSV (build keys off `name`)
 encoder: resnet34

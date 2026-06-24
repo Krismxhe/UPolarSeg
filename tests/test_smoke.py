@@ -409,7 +409,7 @@ def test_segmodule_model_output_normalizes_to_seg_logits():
 def test_identity_skip_passthrough():
     import torch
 
-    from src.models.modular_unet.skip_modules import build_skip_module
+    from src.models.research.modular_unet.skip_modules import build_skip_module
 
     skip = build_skip_module({"name": "identity"}, channels_by_level=[64, 32])
     x = torch.randn(2, 16, 8, 8)

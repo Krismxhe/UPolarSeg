@@ -10,7 +10,7 @@ fusion / skip module instead of a hard-coded concat.
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.modular_unet.fusion import SkipFusion
+from src.models.research.modular_unet.fusion import SkipFusion
 
 
 class Conv2dReLU(nn.Sequential):
