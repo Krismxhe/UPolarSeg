@@ -1,0 +1,20 @@
+# @package _global_
+# Baseline experiment: SMP UNet++ + ResNet34.
+# Run: python train.py +experiment=baselines/smp_unetplusplus_resnet34
+defaults:
+  - override /model: smp/unetplusplus
+  - override /dataset: multiclass
+  - override /augmentation: medium
+  - override /optimizer: adamw
+  - override /loss: dice_ce
+
+model:
+  encoder: resnet34
+  encoder_weights: imagenet
+
+train:
+  img_size: 512
+  seed: 42
+
+logging:
+  name: exp_smp_unetplusplus_resnet34

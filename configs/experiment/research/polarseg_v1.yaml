@@ -1,0 +1,29 @@
+# ============================================================================
+# TEMPLATE — NOT RUNNABLE YET. PolarSeg is not implemented.
+# ============================================================================
+# There is no configs/model/research/polarseg.yaml and the research registry
+# raises for name=polarseg. Implement the model first (Phase: future research),
+# then uncomment the block below and add configs/model/research/polarseg.yaml.
+#
+# This file is a commented example only — do NOT run `+experiment=research/polarseg_v1`.
+#
+# Intended shape (uncomment + adapt once PolarSeg exists):
+#
+# # @package _global_
+# defaults:
+#   - override /model: research/polarseg     # provider=research, name=polarseg (TODO: create)
+#   - override /dataset: multiclass          # shared dataset — same as baselines
+#   - override /augmentation: medium         # shared augmentation
+#   - override /optimizer: adamw             # shared optimizer
+#   - override /loss: dice_ce                # shared loss / metric schema
+#
+# model:
+#   encoder: resnet34
+#   encoder_weights: imagenet
+#
+# train:
+#   img_size: 512
+#   seed: 42
+#
+# logging:
+#   name: exp_polarseg_v1

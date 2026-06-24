@@ -1,0 +1,25 @@
+# ============================================================================
+# ABLATION TEMPLATE — NOT RUNNABLE YET. Boundary loss is not wired into training.
+# ============================================================================
+# Boundary metrics today are eval-only (derived from the segmentation prediction).
+# There is no boundary_logits head wired into SegModule training and no boundary
+# loss term in the loss factory, so a boundary-loss ablation cannot run yet.
+# See src/losses/multitask_loss.py (skeleton) and src/models/research/heads/.
+#
+# This file is a commented example only — do NOT run `+experiment=ablations/boundary_loss`.
+#
+# Intended shape once a boundary head + boundary loss are implemented and wired
+# (uncomment + adapt):
+#
+# # @package _global_
+# defaults:
+#   - /experiment/research/modular_unet_identity   # inherit shared pipeline
+#   - override /loss: dice_ce_boundary             # TODO: create this loss config
+#
+# task:
+#   outputs:
+#     boundary:
+#       enabled: true        # TODO: requires BoundaryHead wired into training
+#
+# logging:
+#   name: exp_ablation_boundary_loss

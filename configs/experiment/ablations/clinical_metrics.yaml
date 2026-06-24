@@ -1,0 +1,22 @@
+# ============================================================================
+# ABLATION TEMPLATE — eval-only feature, not a training ablation yet.
+# ============================================================================
+# Clinical morphology metrics are deterministic and EVAL-ONLY (pixel units, no
+# physical conversion). They are not differentiable and not part of the loss, so
+# there is no "clinical_metrics" training ablation to run. You can already emit
+# the extra eval CSV at evaluation time:
+#
+#   python evaluate.py model=research/modular_unet_identity \
+#       checkpoint=outputs/<run>/checkpoints/best.ckpt split=test \
+#       task.outputs.clinical.enabled=true eval.save_csv=true
+#
+# This file is a commented example only — do NOT run `+experiment=ablations/clinical_metrics`
+# as a training experiment.
+#
+# A future *differentiable* clinical objective would be wired explicitly here
+# (uncomment + adapt) once implemented:
+#
+# # @package _global_
+# defaults:
+#   - /experiment/research/modular_unet_identity
+# # task.outputs.clinical.enabled=true is an EVAL flag (see evaluate.py), not training.

@@ -1,0 +1,27 @@
+# ============================================================================
+# ABLATION TEMPLATE — NOT RUNNABLE YET. Multi-output heads are not wired in.
+# ============================================================================
+# Studies single-head vs multi-head (seg + boundary + clinical) outputs.
+# BoundaryHead / ClinicalHead in src/models/research/heads/ are skeletons NOT
+# wired into SegModule training, and MultiTaskLoss is a skeleton, so an
+# output-heads ablation cannot run yet.
+#
+# This file is a commented example only — do NOT run `+experiment=ablations/output_heads`.
+#
+# Intended shape once heads + MultiTaskLoss are wired into training
+# (uncomment + adapt):
+#
+# # @package _global_
+# defaults:
+#   - /experiment/research/modular_unet_identity   # inherit shared pipeline
+#   - override /task: multitask                     # TODO: create runnable multitask config
+#
+# task:
+#   outputs:
+#     boundary:
+#       enabled: true     # TODO: requires wired BoundaryHead + loss term
+#     clinical:
+#       enabled: true     # TODO: eval-only today
+#
+# logging:
+#   name: exp_ablation_output_heads

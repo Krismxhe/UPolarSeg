@@ -44,12 +44,33 @@ def _compose_cfg():
         return compose(config_name="train")
 
 
+# Commented-example / TODO experiment templates that are intentionally NOT
+# runnable (their model/feature is not implemented or wired yet). They are
+# excluded from the compose check below.
+EXPERIMENT_TEMPLATES = {
+    "research/polarseg_v1",
+    "ablations/skip_modules",
+    "ablations/boundary_loss",
+    "ablations/clinical_metrics",
+    "ablations/output_heads",
+}
+
+
 def test_experiment_configs_compose():
     from hydra import compose, initialize
 
     exp_dir = REPO_ROOT / "configs" / "experiment"
-    names = sorted(p.stem for p in exp_dir.glob("*.yaml"))
+    # recurse into baselines/ research/ ablations/ and keep flat wrappers
+    names = sorted(
+        p.relative_to(exp_dir).with_suffix("").as_posix()
+        for p in exp_dir.rglob("*.yaml")
+    )
+    names = [n for n in names if n not in EXPERIMENT_TEMPLATES]
     assert names, "no experiment configs found"
+    # sanity: both new layered paths and old flat wrappers are present
+    assert "baselines/smp_unet_resnet34" in names
+    assert "research/modular_unet_identity" in names
+    assert "smp_unet_resnet34" in names  # deprecated flat wrapper still composes
     for name in names:
         with initialize(config_path="../configs", version_base=None):
             cfg = compose(config_name="train", overrides=[f"+experiment={name}"])

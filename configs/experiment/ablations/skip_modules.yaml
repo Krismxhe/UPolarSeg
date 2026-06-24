@@ -1,0 +1,25 @@
+# ============================================================================
+# ABLATION TEMPLATE — partially runnable only as an identity seed sweep.
+# ============================================================================
+# Studies the ModularUNet skip module. Only `identity` ships today
+# (src/models/research/modular_unet/skip_modules.py::SKIP_MODULES), so a true
+# skip-module ablation (scse, cbam, …) is NOT runnable yet. Do NOT pass
+# `model.skip.name=scse,cbam` — it will fail.
+#
+# This file is a commented example only — do NOT run `+experiment=ablations/skip_modules`
+# directly (it carries no overrides). Use the research experiment instead:
+#
+# Runnable today (identity control, seed sweep — fair comparison baseline):
+#   python train.py --multirun +experiment=research/modular_unet_identity \
+#       train.seed=42,43,44
+#
+# PLANNED (NOT runnable — scse/cbam not implemented):
+#   # python train.py --multirun +experiment=research/modular_unet_identity \
+#   #     model.skip.name=identity,scse,cbam train.seed=42,43,44
+#
+# Intended shape once additional skip modules are registered (uncomment + adapt):
+#
+# # @package _global_
+# defaults:
+#   - /experiment/research/modular_unet_identity   # inherit shared pipeline
+# # then sweep model.skip.name on the command line via --multirun

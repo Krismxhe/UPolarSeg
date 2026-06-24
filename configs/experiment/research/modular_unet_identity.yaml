@@ -1,0 +1,26 @@
+# @package _global_
+# Research experiment: ModularUNet with the identity skip (ablation control).
+# Run: python train.py +experiment=research/modular_unet_identity
+#
+# Ablation note: only the `identity` skip module ships today. Additional skip
+# modules (scse, cbam, …) are NOT implemented yet — see the commented example
+# in configs/experiment/ablations/skip_modules.yaml. Do not assume they run.
+defaults:
+  - override /model: research/modular_unet_identity
+  - override /dataset: multiclass
+  - override /augmentation: medium
+  - override /optimizer: adamw
+  - override /loss: dice_ce
+
+model:
+  encoder: resnet34
+  encoder_weights: imagenet
+  skip:
+    name: identity        # baseline / ablation control
+
+train:
+  img_size: 512
+  seed: 42
+
+logging:
+  name: exp_modular_unet_identity
