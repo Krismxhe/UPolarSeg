@@ -1,0 +1,24 @@
+# @package _global_
+# Experiment: TransUNet (R50-ViT-B_16) baseline.
+# Run: python train.py +experiment=transunet_r50_vit_b16
+#
+# Note: img_size=224 (must be divisible by patch_size=16). TransUNet pretrained
+# loading is partial — the ViT trains from scratch unless model.pretrained_path
+# points to a compatible torch state_dict; the CNN backbone is ImageNet-init.
+defaults:
+  - override /model: custom/transunet
+  - override /dataset: multiclass
+  - override /augmentation: medium
+  - override /optimizer: adamw
+  - override /loss: dice_ce
+
+model:
+  encoder_weights: imagenet     # CNN backbone init
+  pretrained_path: null
+
+train:
+  img_size: 224
+  seed: 42
+
+logging:
+  name: exp_transunet_r50_vit_b16

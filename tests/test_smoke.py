@@ -44,6 +44,20 @@ def _compose_cfg():
         return compose(config_name="train")
 
 
+def test_experiment_configs_compose():
+    from hydra import compose, initialize
+
+    exp_dir = REPO_ROOT / "configs" / "experiment"
+    names = sorted(p.stem for p in exp_dir.glob("*.yaml"))
+    assert names, "no experiment configs found"
+    for name in names:
+        with initialize(config_path="../configs", version_base=None):
+            cfg = compose(config_name="train", overrides=[f"+experiment={name}"])
+        assert str(cfg.logging.name).startswith("exp_")   # pinned run name
+        assert "provider" in cfg.model                      # model group resolved
+        assert cfg.loss.name in ("dice_ce", "dice_bce")     # loss group resolved
+
+
 def test_config_composes():
     cfg = _compose_cfg()
     assert cfg.model.arch == "Unet"

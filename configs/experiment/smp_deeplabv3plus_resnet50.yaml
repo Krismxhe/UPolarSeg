@@ -1,0 +1,20 @@
+# @package _global_
+# Experiment: SMP DeepLabV3+ + ResNet50 baseline.
+# Run: python train.py +experiment=smp_deeplabv3plus_resnet50
+defaults:
+  - override /model: smp/deeplabv3plus
+  - override /dataset: multiclass
+  - override /augmentation: medium
+  - override /optimizer: adamw
+  - override /loss: dice_ce
+
+model:
+  encoder: resnet50
+  encoder_weights: imagenet
+
+train:
+  img_size: 512
+  seed: 42
+
+logging:
+  name: exp_smp_deeplabv3plus_resnet50

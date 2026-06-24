@@ -1,0 +1,22 @@
+# @package _global_
+# Experiment: SMP UNet + ResNet34 baseline.
+# Run:    python train.py +experiment=smp_unet_resnet34
+# Outputs: checkpoints under outputs/${logging.name}/, eval CSV under
+#          outputs/${logging.name}/eval/<split>/ (summary/per_class/per_case.csv).
+defaults:
+  - override /model: smp/unet
+  - override /dataset: multiclass
+  - override /augmentation: medium
+  - override /optimizer: adamw
+  - override /loss: dice_ce
+
+model:
+  encoder: resnet34
+  encoder_weights: imagenet
+
+train:
+  img_size: 512
+  seed: 42
+
+logging:
+  name: exp_smp_unet_resnet34
