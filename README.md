@@ -6,7 +6,7 @@ Built on [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentatio
 **Key features**
 
 - **Config-driven**: swap model / backbone / loss / optimizer / augmentation from the command line — no code changes.
-- **Pluggable model providers**: SMP baselines, a custom `ModularUNet`, and a hybrid CNN+ViT `TransUNet` baseline through a single `build_model` factory.
+- **Three-layer model providers** through a single `build_model` factory — `smp` (SMP baselines), `baseline` (established non-SMP baselines, e.g. TransUNet), and `research` (your own methods, e.g. ModularUNet). Implementations are separated, but every provider shares one training/evaluation pipeline for a fair comparison. (`custom` remains as a deprecated compatibility alias.)
 - **Multi-class & binary segmentation** through one code path.
 - **Explicit evaluation CSV**: `summary.csv` / `per_class.csv` / `per_case.csv` written on every `evaluate.py` run (not just TensorBoard).
 - **Unified model output contract**: models may return a logits tensor or a dict; `normalize_model_output` handles both.
@@ -20,16 +20,17 @@ Built on [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentatio
 | Capability | Status |
 |---|---|
 | SMP baselines (`model=smp/*`, legacy `model=unet`) | ✅ implemented |
+| Three-layer providers `smp` / `baseline` / `research` (+ deprecated `custom` alias) | ✅ implemented |
 | `build_model` factory + `provider` field | ✅ implemented |
 | Loss factory (`dice_ce`, `dice_bce`) | ✅ implemented |
 | Output contract `normalize_model_output` (Phase 9a) | ✅ implemented |
 | Explicit eval CSV: summary / per_class / per_case (Phase 4) | ✅ implemented |
-| `ModularUNet` + identity skip (Phase 6) | ✅ implemented |
+| `ModularUNet` + identity skip (`model=research/modular_unet_identity`) | ✅ implemented |
 | Clinical morphology eval metrics (`clinical_metrics.csv`) | ✅ implemented (eval-only, **pixel units only**) |
 | Boundary eval metrics (`boundary_metrics.csv`) | ✅ implemented (derived from the seg prediction) |
 | `BoundaryHead` / `ClinicalHead`, `MultiTaskLoss` | 🟡 skeleton — present but **not wired** into training |
 | Extra skip modules (scse, cbam, …) | 🟡 planned — registry ready, only `identity` shipped |
-| **TransUNet** (`model=custom/transunet`) | ✅ implemented (hybrid resnet50 + ViT, self-contained) |
+| **TransUNet** (`model=baseline/transunet`) | ✅ implemented (hybrid resnet50 + ViT, self-contained) |
 | TransUNet official `.npz` pretrained loading | ⛔ planned — only a partial torch `state_dict` load is supported |
 | Physical-unit (mm/mm²) clinical metrics | ⛔ planned — only pixel units are computed |
 | DDP-safe per-case CSV merge | ⛔ planned — CSV export is single-process |
@@ -45,20 +46,23 @@ Medical-Image-Segmentation-Baseline/
 │   ├── model/
 │   │   ├── unet.yaml …            ← legacy configs (no `provider` → treated as smp)
 │   │   ├── smp/                   ← smp/unet, smp/unetplusplus, smp/deeplabv3plus, smp/fpn, smp/manet
-│   │   └── custom/                ← modular_unet.yaml, transunet.yaml (custom provider)
+│   │   ├── baseline/              ← transunet.yaml (provider=baseline)
+│   │   ├── research/              ← modular_unet.yaml, modular_unet_identity.yaml (provider=research)
+│   │   └── custom/                ← modular_unet.yaml, transunet.yaml (DEPRECATED compat aliases)
 │   ├── dataset/  augmentation/  optimizer/
 │   ├── loss/                      ← dice_ce, dice_bce
 │   ├── task/default.yaml          ← multi-task output switches (all OFF)
-│   └── experiment/                ← pinned experiment configs (+experiment=<name>) + README
+│   └── experiment/                ← baselines/ research/ ablations/ (+ deprecated flat wrappers) + README
 ├── src/
 │   ├── datasets/   seg_dataset.py (dict batch + metadata), batch.py (unpack_batch)
 │   ├── models/
-│   │   ├── factory.py             ← build_model(cfg.model, cfg.dataset)
+│   │   ├── factory.py             ← build_model(cfg.model, cfg.dataset) — the only provider router
 │   │   ├── smp_models.py          ← build_smp_model (only place smp models are built)
 │   │   ├── outputs.py             ← normalize_model_output (output contract)
-│   │   ├── seg_module.py          ← LightningModule (provider-agnostic)
-│   │   ├── heads/                 ← BoundaryHead / ClinicalHead (skeleton)
-│   │   └── modular_unet/          ← encoder/decoder/blocks/fusion/skip_modules
+│   │   ├── seg_module.py          ← LightningModule (provider-agnostic; imports no concrete model)
+│   │   ├── baselines/             ← registry.py + transunet/ (provider=baseline)
+│   │   ├── research/              ← registry.py, base.py, modular_unet/ (provider=research)
+│   │   └── heads/                 ← BoundaryHead / ClinicalHead (skeleton, not wired)
 │   ├── losses/                    ← factory.py, segmentation_losses.py, multitask_loss.py (skeleton)
 │   ├── metrics/                   ← functional.py, evaluator.py, morphology.py, boundary_metrics.py, clinical_metrics.py
 │   ├── tasks/                     ← segmentation / boundary / clinical_morphology helpers
@@ -80,39 +84,36 @@ Key dependencies: `torch`, `pytorch-lightning`, `segmentation-models-pytorch`, `
 
 ---
 
-## Models — how to run
+## Models — the three provider layers
 
-### SMP baselines
+`SegModule` is provider-agnostic: it only calls `build_model(cfg.model, cfg.dataset)`
+(`src/models/factory.py`), the single provider router. The three layers separate
+*who owns the implementation*, while everything downstream is shared (see
+[Shared pipeline](#shared-pipeline)).
+
+### `provider=smp` — SMP baselines
+
+Models built directly through `segmentation_models_pytorch` (`Unet`,
+`UnetPlusPlus`, `DeepLabV3Plus`, `FPN`, `MAnet`, …).
 
 ```bash
-# new namespace
 python train.py model=smp/unet
-python train.py model=smp/unetplusplus model.encoder=resnet50
 python train.py model=smp/deeplabv3plus model.encoder=resnet50
+python train.py model=smp/unetplusplus model.encoder=resnet50
 
 # legacy configs still work (no `provider` field → defaults to smp)
 python train.py model=unet
 ```
 
-### ModularUNet (custom, identity skip)
+### `provider=baseline` — established non-SMP baselines
 
-A controllable UNet (SMP encoder backbone + our own decoder) for skip-connection
-research. v1 ships only the `identity` skip module as an ablation control.
-
-```bash
-python train.py model=custom/modular_unet model.skip.name=identity
-```
-
-> `model.img_size` must be divisible by 32 (resnet-style 5-stage encoder).
-
-### TransUNet (custom, hybrid CNN + ViT)
-
-A self-contained hybrid baseline: an SMP ResNet50 backbone feeds its stride-16
-feature map to a ViT transformer encoder, then a cascaded decoder with CNN skip
-connections restores full resolution.
+Established baselines that SMP does not provide. **TransUNet** ships today
+(hybrid: an SMP ResNet50 backbone feeds its stride-16 feature map to a ViT
+encoder, then a cascaded decoder with CNN skips restores full resolution).
+UNETR / SwinUNETR are *planned* (not implemented).
 
 ```bash
-python train.py model=custom/transunet train.img_size=224
+python train.py model=baseline/transunet train.img_size=224
 ```
 
 > `img_size` must be divisible by `patch_size` (16); the effective patch grid is
@@ -120,18 +121,57 @@ python train.py model=custom/transunet train.img_size=224
 > **Pretrained loading is partial**: the CNN backbone can be ImageNet-initialised
 > via `model.encoder_weights`, and `model.pretrained_path` accepts a torch
 > `state_dict` of *this* model (loaded with `strict=False`). The official Google
-> ViT/R50 `.npz` weights are **not** supported. So the transformer trains from
+> ViT/R50 `.npz` weights are **not** supported, so the transformer trains from
 > scratch unless you supply a compatible torch checkpoint.
+
+### `provider=research` — your own methods
+
+User-owned research implementations. **ModularUNet** ships today (a controllable
+UNet: SMP encoder backbone + our own decoder for skip-connection research; v1
+ships only the `identity` skip module as an ablation control). PolarSeg /
+BoundaryAwareUNet / etc. are *planned*.
+
+```bash
+python train.py model=research/modular_unet_identity
+python train.py model=research/modular_unet model.skip.name=identity
+```
+
+> `model.img_size` must be divisible by 32 (resnet-style 5-stage encoder).
+
+### `provider=custom` — deprecated compatibility alias
+
+`custom` is kept **only** so old configs/commands keep working. It maps
+`custom/transunet → baseline/transunet` and `custom/modular_unet →
+research/modular_unet` inside the factory. Do **not** use it in new experiments
+— prefer `baseline` / `research`. See [migration](#model-provider-layers--migration).
 
 ---
 
-## Model config namespaces & migration
+## Shared pipeline
+
+All providers share **one** pipeline, so the only thing that differs between a
+baseline run and a research run is the model (unless an experiment deliberately
+studies another factor). Shared, provider-agnostic:
+
+- `dataset` + `datamodule` + `augmentation`
+- the dict **batch contract** (`src/datasets/batch.py::unpack_batch`)
+- the **output contract** (`src/models/outputs.py::normalize_model_output`)
+- the **loss factory** (`src/losses/factory.py`)
+- `optimizer` / `scheduler`
+- the PyTorch-Lightning **trainer** and `SegModule`
+- the **evaluator** and its `summary.csv` / `per_class.csv` / `per_case.csv` schema
+
+`SegModule` imports no concrete model class, the evaluator never branches on
+provider, and the loss never branches on provider. That is what makes
+baseline-vs-research comparisons fair — same data, same metrics, same CSVs.
+
+## Model provider layers & migration
 
 Each model config carries a `provider` field consumed by `build_model`:
 
 ```yaml
 # configs/model/smp/unet.yaml
-provider: smp          # "smp" or "custom"
+provider: smp          # "smp" | "baseline" | "research" | "custom" (deprecated)
 name: unet
 arch: Unet             # SMP architecture name (also used as the run-name label)
 encoder: resnet34
@@ -140,17 +180,34 @@ in_channels: 3
 params: {}             # extra kwargs forwarded to smp.create_model
 ```
 
-**Migration from the old layout** (no breaking change required):
+| provider | for | built by | configs |
+|---|---|---|---|
+| `smp` | SMP architectures | `src/models/smp_models.py` | `configs/model/smp/*` |
+| `baseline` | established non-SMP baselines (TransUNet) | `src/models/baselines/registry.py` | `configs/model/baseline/*` |
+| `research` | your own methods (ModularUNet) | `src/models/research/registry.py` | `configs/model/research/*` |
+| `custom` | **deprecated** alias for old configs | `factory.py` → baseline/research registry | `configs/model/custom/*` |
 
-- Old configs such as `configs/model/unet.yaml` have **no** `provider` field. They
-  still work — `build_model` treats a missing `provider` as `smp`. So
-  `python train.py model=unet` is unchanged.
-- The new `configs/model/smp/*.yaml` are the preferred namespace going forward
-  (`model=smp/unet`). Custom models live under `configs/model/custom/`.
-- Any custom model config must include `arch` **and** `encoder` label fields
+**Migrating old commands** (old configs still run — nothing breaks):
+
+| Old (deprecated) | New (preferred) |
+|---|---|
+| `python train.py model=custom/transunet train.img_size=224` | `python train.py model=baseline/transunet train.img_size=224` |
+| `python train.py model=custom/modular_unet` | `python train.py model=research/modular_unet_identity` *or* `model=research/modular_unet` |
+| `python train.py +experiment=transunet_r50_vit_b16` | `python train.py +experiment=baselines/transunet_r50_vit_b16` |
+| `python train.py +experiment=modular_unet_identity` | `python train.py +experiment=research/modular_unet_identity` |
+
+Notes:
+
+- Legacy configs such as `configs/model/unet.yaml` have **no** `provider` field;
+  `build_model` treats a missing `provider` as `smp`, so `python train.py model=unet`
+  is unchanged.
+- The old flat `+experiment=<name>` names are kept as deprecated forwarding
+  wrappers, so they still work; see `configs/experiment/README.md`.
+- Any non-SMP model config must include `arch` **and** `encoder` label fields,
   because the run name is `logging.name = ${model.arch}_${model.encoder}_${dataset.name}`
-  (e.g. ModularUNet and TransUNet configs set these labels even though the build
-  keys off `name` / `vit_name`).
+  (ModularUNet/TransUNet configs set these labels even though the build keys off
+  `name` / `vit_name`).
+- A short standalone migration guide also lives in [`docs/MIGRATION.md`](docs/MIGRATION.md).
 
 ---
 
@@ -245,20 +302,27 @@ python train.py --multirun model=smp/unet,smp/unetplusplus model.encoder=resnet3
 Pinned, reproducible configurations live in `configs/experiment/` (Hydra
 `# @package _global_` files). Run one with the **append** (`+`) syntax:
 
+Configs are grouped into `baselines/`, `research/`, and `ablations/`:
+
 ```bash
-python train.py +experiment=smp_unet_resnet34
-python train.py +experiment=smp_unetplusplus_resnet34
-python train.py +experiment=smp_deeplabv3plus_resnet50
-python train.py +experiment=modular_unet_identity
-python train.py +experiment=transunet_r50_vit_b16
+python train.py +experiment=baselines/smp_unet_resnet34
+python train.py +experiment=baselines/smp_unetplusplus_resnet34
+python train.py +experiment=baselines/smp_deeplabv3plus_resnet50
+python train.py +experiment=baselines/transunet_r50_vit_b16 train.img_size=224
+python train.py +experiment=research/modular_unet_identity
 ```
+
+> The old flat names (`+experiment=smp_unet_resnet34`, …) still work via
+> deprecated forwarding wrappers. `configs/experiment/ablations/*` and
+> `research/polarseg_v1` are **commented templates (not runnable)** for
+> not-yet-implemented features.
 
 Each experiment pins model / dataset / augmentation / optimizer / loss,
 `train.img_size`, `train.seed` and a stable `logging.name`; the fully-resolved
 `config.yaml` is saved next to the evaluation CSVs for traceability. Seed sweep:
 
 ```bash
-python train.py --multirun +experiment=modular_unet_identity train.seed=42,43,44
+python train.py --multirun +experiment=research/modular_unet_identity train.seed=42,43,44
 ```
 
 > Skip-module ablation beyond `identity` (scse, cbam, …) is **not implemented
@@ -378,19 +442,39 @@ Produces a side-by-side input / colour-coded prediction visualisation.
 
 ## Developer guide
 
-### Add a new baseline model
+### Add a new baseline model (`provider=baseline`)
 
-1. Implement the model under `src/models/<new_model>/` (a `torch.nn.Module`).
-2. Register it in `src/models/factory.py` under `provider == "custom"` (dispatch on `name`).
-3. Add `configs/model/custom/<new_model>.yaml` with `provider: custom`, `name: <new_model>`,
-   and `arch:` + `encoder:` label fields (used by `logging.name`).
+1. Implement the model under `src/models/baselines/<new_model>/` (a `torch.nn.Module`).
+2. Register a builder in `src/models/baselines/registry.py` (`build_baseline_model`
+   dispatches on `name`). Do **not** touch `factory.py` or `SegModule`.
+3. Add `configs/model/baseline/<new_model>.yaml` with `provider: baseline`,
+   `name: <new_model>`, and `arch:` + `encoder:` label fields (used by `logging.name`).
 4. Ensure `forward` returns logits `B×C×H×W` **or** a dict containing `"seg_logits"`
    (both are handled by `normalize_model_output`).
+5. Add a forward-shape test (see `tests/test_smoke.py::test_transunet_forward_shape`).
+6. Baseline code must **not** import research code.
+
+### Add a new research model (`provider=research`)
+
+1. Implement the model under `src/models/research/<your_method>/` (a `torch.nn.Module`).
+   `src/models/research/base.py::ResearchModel` is an optional convenience base.
+   (Skeleton output heads currently live at `src/models/heads/` —
+   `BoundaryHead` / `ClinicalHead` — not yet wired into training.)
+2. Register a builder in `src/models/research/registry.py` (`build_research_model`
+   dispatches on `name`). Do **not** touch `factory.py` or `SegModule`.
+3. Add `configs/model/research/<your_method>.yaml` with `provider: research`,
+   `name: <your_method>`, and `arch:` + `encoder:` labels.
+4. Ensure `forward` returns logits **or** a dict that honours the output contract
+   (`{"seg_logits": ..., "boundary_logits"?: ..., "clinical"?: ..., "features"?: ...}`).
 5. Add a forward-shape test (see `tests/test_smoke.py::test_modular_unet_identity_forward_shape`).
+6. Do **not** modify the shared training pipeline, and research code must **not**
+   import baseline internals.
+
+> `custom` is deprecated — do not add new models under `provider=custom`.
 
 ### Add a new skip module (ModularUNet)
 
-1. Implement an `nn.Module` in `src/models/modular_unet/skip_modules.py`:
+1. Implement an `nn.Module` in `src/models/research/modular_unet/skip_modules.py`:
 
    ```python
    class MySkip(SkipModule):
@@ -399,12 +483,13 @@ Produces a side-by-side input / colour-coded prediction visualisation.
            return skip  # must preserve spatial size; v1 also preserves channels
    ```
 
-2. Register it: `SKIP_MODULES["my_skip"] = MySkip`.
-3. Select it via `model.skip.name=my_skip` (no config file needed).
+2. Register it in `SKIP_MODULES` (`SKIP_MODULES["my_skip"] = MySkip`).
+3. Select it via `model.skip.name=my_skip` (no config file needed). Do **not**
+   modify SMP's internal UNet decoder.
 4. Run the identity-vs-new-module ablation:
 
    ```bash
-   python train.py --multirun model=custom/modular_unet \
+   python train.py --multirun model=research/modular_unet \
        model.skip.name=identity,my_skip train.seed=42,43,44
    ```
 
@@ -423,8 +508,12 @@ pytest                                   # unit + smoke tests
 python train.py model=smp/unet train.epochs=1 train.batch_size=2 train.num_workers=0 \
     train.img_size=128 model.encoder_weights=null hardware.accelerator=cpu
 
-python train.py model=custom/modular_unet model.skip.name=identity \
+python train.py model=research/modular_unet_identity \
     train.epochs=1 train.batch_size=2 train.num_workers=0 train.img_size=128 \
+    model.encoder_weights=null hardware.accelerator=cpu
+
+python train.py model=baseline/transunet train.img_size=224 \
+    train.epochs=1 train.batch_size=2 train.num_workers=0 \
     model.encoder_weights=null hardware.accelerator=cpu
 
 python evaluate.py checkpoint=outputs/<name>/checkpoints/best.ckpt \
