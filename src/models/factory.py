@@ -30,9 +30,11 @@ def build_model(model_cfg, dataset_cfg) -> nn.Module:
         if name == "modular_unet":
             from src.models.modular_unet import build_modular_unet
             return build_modular_unet(model_cfg, dataset_cfg)
-        # transunet arrives in Phase 5.
+        if name == "transunet":
+            from src.models.transunet import build_transunet
+            return build_transunet(model_cfg, dataset_cfg)
         raise ValueError(
-            f"Unknown custom model name: '{name}'. Available: 'modular_unet'."
+            f"Unknown custom model name: '{name}'. Available: 'modular_unet', 'transunet'."
         )
 
     raise ValueError(

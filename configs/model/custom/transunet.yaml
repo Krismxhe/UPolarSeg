@@ -1,0 +1,21 @@
+# TransUNet — hybrid CNN (ResNet50) + ViT baseline (Phase 5).
+# Self-contained implementation; the ViT transformer trains from scratch unless a
+# compatible torch checkpoint is given via pretrained_path (official .npz weights
+# are NOT supported — see src/models/transunet/load_pretrained.py).
+provider: custom
+name: transunet
+arch: TransUNet           # display label for logging.name / eval CSV (build keys off `name`)
+in_channels: 3
+img_size: ${train.img_size}   # must be divisible by patch_size
+vit_name: R50-ViT-B_16        # → resnet50 CNN backbone
+encoder: resnet50             # display label for logging.name / eval CSV (backbone is set by vit_name)
+patch_size: 16
+n_skip: 3
+encoder_weights: imagenet     # CNN backbone init; null for random / offline
+pretrained_path: null         # optional torch state_dict of THIS model (partial load)
+params:
+  hidden_size: 768
+  mlp_dim: 3072
+  num_heads: 12
+  num_layers: 12
+  dropout_rate: 0.0

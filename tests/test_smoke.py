@@ -423,6 +423,38 @@ def test_modular_unet_identity_forward_shape():
     assert y.shape == (2, cfg.dataset.num_classes, 256, 256)
 
 
+def test_transunet_forward_shape():
+    import torch
+    from hydra import compose, initialize
+
+    from src.models.factory import build_model
+
+    with initialize(config_path="../configs", version_base=None):
+        cfg = compose(
+            config_name="train",
+            overrides=[
+                "model=custom/transunet",
+                "train.img_size=224",
+                "model.encoder_weights=null",
+                "model.params.num_layers=2",   # keep the test light
+            ],
+        )
+    assert cfg.model.provider == "custom" and cfg.model.name == "transunet"
+
+    model = build_model(cfg.model, cfg.dataset).eval()
+    x = torch.randn(2, 3, 224, 224)
+    with torch.no_grad():
+        y = model(x)
+    assert y.shape == (2, cfg.dataset.num_classes, 224, 224)
+
+
+def test_transunet_img_size_divisible_check():
+    from src.models.transunet.model import TransUNet
+
+    with pytest.raises(ValueError):
+        TransUNet(img_size=225, patch_size=16, encoder_weights=None)
+
+
 def test_build_model_smp_forward_shape():
     import torch
 
