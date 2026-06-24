@@ -11,6 +11,7 @@ Built on [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentatio
 - **Explicit evaluation CSV**: `summary.csv` / `per_class.csv` / `per_case.csv` written on every `evaluate.py` run (not just TensorBoard).
 - **Unified model output contract**: models may return a logits tensor or a dict; `normalize_model_output` handles both.
 - **Multi-task scaffold (Phase 9b)**: optional, eval-only boundary and clinical-morphology metrics — all OFF by default.
+- **Reproducible experiments**: pinned Hydra experiment configs under `configs/experiment/`, run with `+experiment=<name>`.
 
 ---
 
@@ -44,11 +45,11 @@ Medical-Image-Segmentation-Baseline/
 │   ├── model/
 │   │   ├── unet.yaml …            ← legacy configs (no `provider` → treated as smp)
 │   │   ├── smp/                   ← smp/unet, smp/unetplusplus, smp/deeplabv3plus, smp/fpn, smp/manet
-│   │   └── custom/
-│   │       └── modular_unet.yaml  ← ModularUNet (custom provider)
+│   │   └── custom/                ← modular_unet.yaml, transunet.yaml (custom provider)
 │   ├── dataset/  augmentation/  optimizer/
 │   ├── loss/                      ← dice_ce, dice_bce
-│   └── task/default.yaml          ← multi-task output switches (all OFF)
+│   ├── task/default.yaml          ← multi-task output switches (all OFF)
+│   └── experiment/                ← pinned experiment configs (+experiment=<name>) + README
 ├── src/
 │   ├── datasets/   seg_dataset.py (dict batch + metadata), batch.py (unpack_batch)
 │   ├── models/
@@ -236,6 +237,35 @@ Multi-GPU / DDP and Hydra multirun behave as before:
 python train.py hardware.devices=4 hardware.strategy=ddp train.precision=16-mixed
 python train.py --multirun model=smp/unet,smp/unetplusplus model.encoder=resnet34,resnet50
 ```
+
+---
+
+## Experiments & reproducibility
+
+Pinned, reproducible configurations live in `configs/experiment/` (Hydra
+`# @package _global_` files). Run one with the **append** (`+`) syntax:
+
+```bash
+python train.py +experiment=smp_unet_resnet34
+python train.py +experiment=smp_unetplusplus_resnet34
+python train.py +experiment=smp_deeplabv3plus_resnet50
+python train.py +experiment=modular_unet_identity
+python train.py +experiment=transunet_r50_vit_b16
+```
+
+Each experiment pins model / dataset / augmentation / optimizer / loss,
+`train.img_size`, `train.seed` and a stable `logging.name`; the fully-resolved
+`config.yaml` is saved next to the evaluation CSVs for traceability. Seed sweep:
+
+```bash
+python train.py --multirun +experiment=modular_unet_identity train.seed=42,43,44
+```
+
+> Skip-module ablation beyond `identity` (scse, cbam, …) is **not implemented
+> yet** — see the commented TODO in `configs/experiment/README.md`. That file also
+> documents which config fields capture every tracked item (provider/name,
+> encoder, pretrained, loss, optimizer/scheduler, img_size, augmentation, dataset,
+> seed, checkpoint path, eval split, and the summary/per_class/per_case CSV paths).
 
 ---
 
