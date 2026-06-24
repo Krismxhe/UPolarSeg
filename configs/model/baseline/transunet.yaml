@@ -1,14 +1,9 @@
 # TransUNet — hybrid CNN (ResNet50) + ViT baseline.
-#
-# DEPRECATED compatibility config. TransUNet now lives in the baseline layer;
-# prefer `model=baseline/transunet`. provider=custom is a deprecated alias that
-# routes custom/transunet → the baseline registry (see src/models/factory.py).
-# This file is kept so old `model=custom/transunet` commands keep working.
-#
+# Baseline layer (provider=baseline). Run with: model=baseline/transunet
 # Self-contained implementation; the ViT transformer trains from scratch unless a
 # compatible torch checkpoint is given via pretrained_path (official .npz weights
 # are NOT supported — see src/models/baselines/transunet/load_pretrained.py).
-provider: custom
+provider: baseline
 name: transunet
 arch: TransUNet           # display label for logging.name / eval CSV (build keys off `name`)
 in_channels: 3

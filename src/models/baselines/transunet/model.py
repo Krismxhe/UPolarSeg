@@ -16,8 +16,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from segmentation_models_pytorch.encoders import get_encoder
 
-from src.models.transunet.decoder import TransUNetDecoder
-from src.models.transunet.vit import PatchEmbedding, TransformerEncoder
+from src.models.baselines.transunet.decoder import TransUNetDecoder
+from src.models.baselines.transunet.vit import PatchEmbedding, TransformerEncoder
 
 # Map ViT preset names to the CNN backbone used as the hybrid encoder.
 _VIT_TO_ENCODER = {
@@ -107,6 +107,6 @@ def build_transunet(model_cfg, dataset_cfg) -> TransUNet:
     )
     pretrained_path = model_cfg.get("pretrained_path", None)
     if pretrained_path:
-        from src.models.transunet.load_pretrained import load_transunet_weights
+        from src.models.baselines.transunet.load_pretrained import load_transunet_weights
         load_transunet_weights(model, pretrained_path)
     return model

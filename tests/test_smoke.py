@@ -463,7 +463,7 @@ def test_transunet_forward_shape():
 
 
 def test_transunet_img_size_divisible_check():
-    from src.models.transunet.model import TransUNet
+    from src.models.baselines.transunet.model import TransUNet
 
     with pytest.raises(ValueError):
         TransUNet(img_size=225, patch_size=16, encoder_weights=None)
