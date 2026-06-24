@@ -46,3 +46,14 @@ logging:
 
 # ── Evaluation split (used by evaluate.py) ────────────────────────────────────
 split: test               # "train", "val", or "test"
+
+# ── Evaluation CSV export (used by evaluate.py; ignored by train.py) ──────────
+eval:
+  save_csv: true            # write summary/per_class/per_case CSV
+  save_predictions: false   # (not implemented yet) save predicted masks
+  save_overlay: false       # (not implemented yet) save colour overlays
+  threshold: 0.5            # binary: sigmoid(logits) > threshold
+  include_background: false # exclude background from mean_* unless true
+  output_dir: null          # default: <save_dir>/<logging.name>/eval/<split>
+  per_case: true
+  per_class: true

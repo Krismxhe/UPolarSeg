@@ -78,6 +78,10 @@ class SegModule(pl.LightningModule):
         # evaluate.py to reflect the actual split being evaluated.
         self.eval_split = 'test'
 
+        # Per-case records collected during test_step → consumed by evaluate.py
+        # to write explicit summary/per_class/per_case CSV (Phase 4).
+        self.test_records = []
+
     # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(self, x):
@@ -130,16 +134,59 @@ class SegModule(pl.LightningModule):
     def on_validation_epoch_end(self):
         self._log_metrics('val', self.val_dice, self.val_iou)
 
+    def on_test_epoch_start(self):
+        # Reset so repeated test() calls don't accumulate stale records.
+        self.test_records = []
+
     def test_step(self, batch, batch_idx):
-        images, masks, _meta = unpack_batch(batch)
+        images, masks, meta = unpack_batch(batch)
         outputs = normalize_model_output(self(images))
         logits = outputs['seg_logits']
         preds = self._predict(logits)
         self.test_dice.update(preds, masks)
         self.test_iou.update(preds, masks)
+        self._collect_records(logits, preds, masks, meta, batch_idx)
 
     def on_test_epoch_end(self):
         self._log_metrics(self.eval_split, self.test_dice, self.test_iou)
+
+    # ── Per-case record collection (Phase 4) ──────────────────────────────────
+
+    @staticmethod
+    def _meta_get(meta, key, idx, default):
+        """Fetch meta[key][idx] from a (possibly collated) batch metadata dict."""
+        if isinstance(meta, dict) and key in meta:
+            value = meta[key]
+            try:
+                return value[idx]
+            except (TypeError, IndexError, KeyError):
+                return value
+        return default
+
+    def _collect_records(self, logits, preds, masks, meta, batch_idx):
+        from src.metrics.functional import case_class_metrics, predict_from_logits
+
+        # Use the configured threshold for the per-case binary prediction (the
+        # torchmetrics aggregate above keeps its own 0.5 default).
+        if self._is_binary:
+            threshold = float(self.cfg.get('eval', {}).get('threshold', 0.5))
+            rec_preds = predict_from_logits(logits, is_binary=True, threshold=threshold)
+            class_values = [0, 1]
+        else:
+            rec_preds = preds
+            class_values = list(range(self.num_classes))
+
+        for b in range(rec_preds.shape[0]):
+            per_class = case_class_metrics(
+                rec_preds[b].cpu(), masks[b].cpu(), class_values
+            )
+            self.test_records.append({
+                'case_id':    self._meta_get(meta, 'case_id',    b, f'case_{batch_idx}_{b}'),
+                'image_path': self._meta_get(meta, 'image_path', b, ''),
+                'mask_path':  self._meta_get(meta, 'mask_path',  b, ''),
+                'pred_path':  '',
+                'per_class':  per_class,
+            })
 
     # ── Metric logging helper ─────────────────────────────────────────────────
 

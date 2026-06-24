@@ -63,6 +63,85 @@ def test_build_transforms_returns_compose():
         assert isinstance(tf, A.Compose)
 
 
+def test_functional_empty_mask_conventions():
+    import torch
+
+    from src.metrics.functional import case_class_metrics
+
+    z = torch.zeros(4, 4, dtype=torch.long)
+    o = torch.ones(4, 4, dtype=torch.long)
+
+    # pred empty & target empty (class 1 absent in both) → dice=iou=1
+    m = case_class_metrics(z, z, [1])[1]
+    assert m["dice"] == 1.0 and m["iou"] == 1.0
+    assert m["precision"] == 1.0 and m["recall"] == 1.0
+
+    # pred non-empty & target empty → dice=iou=0
+    m = case_class_metrics(o, z, [1])[1]
+    assert m["dice"] == 0.0 and m["iou"] == 0.0
+
+    # pred empty & target non-empty → dice=iou=0
+    m = case_class_metrics(z, o, [1])[1]
+    assert m["dice"] == 0.0 and m["iou"] == 0.0
+
+    # perfect overlap → dice=iou=1
+    m = case_class_metrics(o, o, [1])[1]
+    assert m["dice"] == 1.0 and m["iou"] == 1.0
+
+
+def test_functional_no_nan_on_any_combination():
+    import math
+
+    import torch
+
+    from src.metrics.functional import case_class_metrics
+
+    z = torch.zeros(2, 2, dtype=torch.long)
+    o = torch.ones(2, 2, dtype=torch.long)
+    for pred in (z, o):
+        for tgt in (z, o):
+            for v in case_class_metrics(pred, tgt, [0, 1]).values():
+                for key in ("dice", "iou", "precision", "recall"):
+                    assert not math.isnan(v[key])
+
+
+def test_evaluator_writes_three_csvs(tmp_path):
+    import csv as _csv
+
+    from src.metrics.evaluator import SegEvaluator
+
+    cfg = _compose_cfg()  # multiclass (3 classes, foreground [1,2])
+
+    def rec(case_id):
+        # all classes score perfectly → trivial but exercises aggregation
+        per_class = {c: {"dice": 1.0, "iou": 1.0, "precision": 1.0,
+                         "recall": 1.0, "support": 10.0} for c in range(cfg.dataset.num_classes)}
+        return {"case_id": case_id, "image_path": f"/x/{case_id}.png",
+                "mask_path": f"/m/{case_id}.png", "pred_path": "", "per_class": per_class}
+
+    records = [rec("a"), rec("b"), rec("c")]
+    evaluator = SegEvaluator(cfg, split="test", run_name="unit", checkpoint="ckpt")
+    written = evaluator.write(records, tmp_path)
+
+    for name in ("summary", "per_class", "per_case"):
+        assert Path(written[name]).is_file()
+
+    with open(written["per_case"]) as f:
+        per_case = list(_csv.DictReader(f))
+    assert len(per_case) == len(records)  # one row per case
+
+    with open(written["summary"]) as f:
+        summary = list(_csv.DictReader(f))
+    assert len(summary) == 1
+    assert {"mean_dice", "mean_iou"} <= set(summary[0].keys())
+    assert summary[0]["num_cases"] == "3"
+
+    with open(written["per_class"]) as f:
+        per_class = list(_csv.DictReader(f))
+    # at least the foreground classes are present
+    assert len(per_class) == cfg.dataset.num_classes
+
+
 def test_config_includes_loss_group():
     cfg = _compose_cfg()
     assert cfg.loss.name == "dice_ce"
