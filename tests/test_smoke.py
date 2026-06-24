@@ -392,6 +392,37 @@ def test_segmodule_model_output_normalizes_to_seg_logits():
     assert out["seg_logits"].shape == (2, cfg.dataset.num_classes, 64, 64)
 
 
+def test_identity_skip_passthrough():
+    import torch
+
+    from src.models.modular_unet.skip_modules import build_skip_module
+
+    skip = build_skip_module({"name": "identity"}, channels_by_level=[64, 32])
+    x = torch.randn(2, 16, 8, 8)
+    out = skip(x, decoder_feature=None, level=0)
+    assert out is x  # identity returns the skip unchanged
+
+
+def test_modular_unet_identity_forward_shape():
+    import torch
+    from hydra import compose, initialize
+
+    from src.models.factory import build_model
+
+    with initialize(config_path="../configs", version_base=None):
+        cfg = compose(
+            config_name="train",
+            overrides=["model=custom/modular_unet", "model.encoder_weights=null"],
+        )
+    assert cfg.model.provider == "custom" and cfg.model.name == "modular_unet"
+
+    model = build_model(cfg.model, cfg.dataset).eval()
+    x = torch.randn(2, 3, 256, 256)
+    with torch.no_grad():
+        y = model(x)
+    assert y.shape == (2, cfg.dataset.num_classes, 256, 256)
+
+
 def test_build_model_smp_forward_shape():
     import torch
 

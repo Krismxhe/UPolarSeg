@@ -25,9 +25,16 @@ def build_model(model_cfg, dataset_cfg) -> nn.Module:
         from src.models.smp_models import build_smp_model
         return build_smp_model(model_cfg, dataset_cfg)
 
-    # Custom providers (transunet, modular_unet, …) are introduced in later
-    # phases. Fail loudly rather than silently falling back to SMP.
+    if provider == "custom":
+        name = str(model_cfg.get("name", "")).lower()
+        if name == "modular_unet":
+            from src.models.modular_unet import build_modular_unet
+            return build_modular_unet(model_cfg, dataset_cfg)
+        # transunet arrives in Phase 5.
+        raise ValueError(
+            f"Unknown custom model name: '{name}'. Available: 'modular_unet'."
+        )
+
     raise ValueError(
-        f"Unknown model provider: '{provider}'. "
-        "Only 'smp' is supported so far; custom providers arrive in later phases."
+        f"Unknown model provider: '{provider}'. Available: 'smp', 'custom'."
     )

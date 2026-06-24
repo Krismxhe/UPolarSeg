@@ -1,0 +1,14 @@
+# ModularUNet — controllable UNet for skip-connection module research (Phase 6).
+# SMP encoder backbone + custom decoder with configurable skip fusion.
+provider: custom
+name: modular_unet
+arch: ModularUNet         # display label for logging.name / eval CSV (build keys off `name`)
+encoder: resnet34
+encoder_weights: imagenet
+in_channels: 3
+decoder_channels: [256, 128, 64, 32, 16]
+skip:
+  name: identity          # baseline / ablation control (only one shipped in v1)
+  placement: before_concat
+  levels: all
+  params: {}
