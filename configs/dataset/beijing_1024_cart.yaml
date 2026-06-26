@@ -1,0 +1,8 @@
+name: beijing_1024_cart
+root: /data2/ziyue_data/fundus_od_ppa_hmx/dataset_1024
+mask_dir: masks_semantic
+mask_mode: index
+num_classes: 3
+class_names: [background, OD, PPA]
+# Foreground class indices used to compute mean Dice/IoU (excludes background)
+foreground_classes: [1, 2]

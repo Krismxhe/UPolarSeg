@@ -14,15 +14,15 @@ defaults:
 
 # ── Training hyper-parameters ─────────────────────────────────────────────────
 train:
-  epochs: 100
-  batch_size: 8
+  epochs: 150
+  batch_size: 4
   img_size: 512           # images are resized to (img_size × img_size)
   num_workers: 4
   seed: 42
   val_interval: 1         # run validation every N epochs
   precision: "32-true"    # "16-mixed" for AMP, "32-true" for full precision
-  early_stopping: false
-  early_stopping_patience: 15
+  early_stopping: True
+  early_stopping_patience: 20
 
 # ── Hardware / distributed training ──────────────────────────────────────────
 hardware:
