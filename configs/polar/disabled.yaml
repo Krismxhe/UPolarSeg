@@ -1,0 +1,16 @@
+# @package polar
+
+name: disbaled
+enabled: false
+
+train:
+  input_space: cart
+  target_space: cart
+
+output:
+  space: cart
+
+eval:
+  metric_space: cart
+  inverse_after: none
+

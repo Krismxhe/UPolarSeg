@@ -10,6 +10,7 @@ defaults:
   - optimizer: adamw
   - loss: dice_ce
   - task: default
+  - polar: disabled
   - _self_
 
 # ── Training hyper-parameters ─────────────────────────────────────────────────

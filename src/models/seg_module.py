@@ -46,7 +46,7 @@ class SegModule(pl.LightningModule):
         self.foreground_ids   = list(cfg.dataset.foreground_classes)
         self.class_names      = list(cfg.dataset.class_names)
         self._is_binary       = (self.num_classes == 1)
-
+            
         # ── Model ─────────────────────────────────────────────────────────────
         # Built via the factory so SegModule stays agnostic to the provider
         # (SMP today; custom TransUNet / ModularUNet in later phases).

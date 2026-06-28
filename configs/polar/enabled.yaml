@@ -1,0 +1,20 @@
+# @package polar
+
+name: enabled
+enabled: true
+
+train:
+  input_space: polar
+  target_space: polar
+
+eval:
+  metric_space: cart
+  inverse_after: hard_mask
+
+geometry:
+  center: null
+  pt_type: corner
+  max_radius: null
+  radius_bins: ${train.img_size}
+  angle_bins: ${train.img_size}
+  mode: linear

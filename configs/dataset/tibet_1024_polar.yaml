@@ -1,0 +1,17 @@
+# ── Template for multi-class segmentation ────────────────────────────────────
+#
+# Copy this file, rename it (e.g. configs/dataset/my_dataset.yaml), fill in
+# your values, then run:
+#
+#   python train.py dataset=my_dataset
+#
+# mask_mode:
+#   index  → pixel values are class indices 0, 1, 2, …  ← use for multi-class
+name: tibet_1024_polar
+root: /data2/ziyue_data/tibet_crop_1024_hmx
+mask_dir: masks_semantic
+mask_mode: index
+num_classes: 3
+class_names: [background, OD, PPA]
+# Foreground class indices used to compute mean Dice/IoU (excludes background)
+foreground_classes: [1, 2]
