@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 from src.models.research.modular_unet.decoder import ModularUnetDecoder
 from src.models.research.modular_unet.encoder import build_encoder
+from segmentation_models_pytorch.base import initialization as init
 
 
 class ModularUNet(nn.Module):
@@ -29,8 +30,16 @@ class ModularUNet(nn.Module):
         self.decoder = ModularUnetDecoder(
             self.encoder.out_channels, list(decoder_channels), skip_cfg or {}
         )
-        self.segmentation_head = nn.Conv2d(decoder_channels[-1], num_classes, kernel_size=1)
-
+        self.segmentation_head = nn.Conv2d(decoder_channels[-1], 
+                                           num_classes, 
+                                           kernel_size=3,
+                                           padding=1)
+        self.initialize()
+        
+    def initialize(self):
+        init.initialize_decoder(self.decoder)
+        init.initialize_head(self.segmentation_head)
+        
     def forward(self, x):
         h, w = x.shape[-2:]
         features = self.encoder(x)

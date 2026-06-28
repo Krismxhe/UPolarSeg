@@ -23,7 +23,7 @@ train:
   val_interval: 1         # run validation every N epochs
   precision: "32-true"    # "16-mixed" for AMP, "32-true" for full precision
   early_stopping: True
-  early_stopping_patience: 20
+  early_stopping_patience: 30
 
 # ── Hardware / distributed training ──────────────────────────────────────────
 hardware:
