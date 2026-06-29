@@ -1,0 +1,37 @@
+# ModularUNet + channel-expanding PMSR skip module.
+# Run with: python train.py model=research/modular_unet_pmsr_expand polar=enabled
+
+provider: research
+name: modular_unet
+arch: ModularUNet_PMSR_lite
+
+encoder: resnet34
+encoder_weights: imagenet
+in_channels: 3
+decoder_channels: [256, 128, 64, 32, 16]
+
+skip:
+  name: pmsr_expand
+  placement: before_concat
+  levels: all
+  params:
+    k_radial: 3
+    k_angular: 3
+
+    reduction: 4
+    min_hidden_channels: 16
+
+    axis_conv_type: depthwise  # depthwise | group | full
+    axis_groups: 8
+
+    use_radius_coord: false
+    use_radius_gate: false
+
+    radial_padding: replicate
+    angular_padding: circular
+
+    norm: gn
+    init_gamma: 0.01
+
+    # both | radial | angular
+    axis_mode: both
