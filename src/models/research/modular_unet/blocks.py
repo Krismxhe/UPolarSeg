@@ -1,10 +1,9 @@
 """
-Decoder building blocks (Phase 6).
+Decoder building blocks.
 
-A DecoderBlock upsamples the running decoder feature ×2, optionally fuses the
-encoder skip via SkipFusion, then applies two Conv-BN-ReLU layers. This mirrors
-a standard UNet decoder block but routes the skip through the configurable
-fusion / skip module instead of a hard-coded concat.
+``skip_channels`` here means the channel count after SkipModule transformation.
+For identity/channel-preserving skips this equals the encoder skip width; for
+PMSR-Expand it is larger.
 """
 
 import torch.nn as nn
@@ -23,17 +22,25 @@ class Conv2dReLU(nn.Sequential):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, skip_channels, out_channels, skip_module, level,
-                 placement="before_concat", mode="concat"):
+    def __init__(
+        self,
+        in_channels,
+        skip_channels,
+        out_channels,
+        skip_module,
+        level,
+        placement="before_concat",
+        mode="concat",
+    ):
         super().__init__()
         self.level = level
         self.has_skip = skip_channels > 0
         self.fusion = (
             SkipFusion(skip_module, mode=mode, placement=placement)
-            if self.has_skip else None
+            if self.has_skip
+            else None
         )
-        # After fusion the channel width is in_channels + skip_channels
-        # (skip module preserves channel count in v1).
+
         self.conv1 = Conv2dReLU(in_channels + skip_channels, out_channels)
         self.conv2 = Conv2dReLU(out_channels, out_channels)
 
