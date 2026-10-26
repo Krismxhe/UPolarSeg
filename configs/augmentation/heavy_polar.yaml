@@ -1,0 +1,36 @@
+# Heavy augmentation — aggressive transforms for regularization on larger datasets
+random_resized_crop:
+  enabled: true
+  scale: [0.3, 1.0]
+horizontal_flip:
+  enabled: false
+  p: 0.5
+vertical_flip:
+  enabled: true
+  p: 0.5
+random_rotate90:
+  enabled: false
+  p: 0.5
+elastic:
+  enabled: true
+  p: 0.3
+grid_distortion:
+  enabled: true
+  p: 0.3
+color_jitter:
+  enabled: true
+  brightness: 0.4
+  contrast: 0.4
+  saturation: 0.4
+  hue: 0.15
+  p: 0.7
+gaussian_blur:
+  enabled: true
+  sigma_limit: [0.1, 3.0]
+  p: 0.4
+gaussian_noise:
+  enabled: true
+  p: 0.3
+normalize:
+  mean: [0.485, 0.456, 0.406]
+  std: [0.229, 0.224, 0.225]

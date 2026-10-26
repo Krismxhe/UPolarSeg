@@ -128,7 +128,7 @@ def cart_to_polar_mask(
         mask.astype(np.float32, copy=False),
         dsize= (int(radius_bins), int(angle_bins)),
         center=center,
-        maxRaidus=float(max_radius),
+        maxRadius=float(max_radius),
         flags=flags,
     )
     
@@ -144,7 +144,7 @@ def polar_mask_to_cart(
     fill_value: int = 0,
 ) -> np.ndarray:
     flags = (
-        polar_flag_from_mode(mode)
+        (cv2.WARP_POLAR_LOG if mode == 'log' else cv2.WARP_POLAR_LINEAR)
         | cv2.WARP_INVERSE_MAP
         | cv2.WARP_FILL_OUTLIERS
         | cv2.INTER_NEAREST

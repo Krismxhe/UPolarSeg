@@ -60,6 +60,36 @@ eval:
   per_case: true
   per_class: true
 
+  # OD/PPA research evaluation
+  odppa:
+    enabled: false
+
+    od_class_id: 1
+    ppa_class_id: 2
+
+    # NSD tolerance:
+    # tolerance = GT OD equivalent diameter × 0.01
+    nsd_tolerance_od_ratio: 0.01
+
+    # If numeric, overrides the ratio above.
+    # Example: 2.0 means fixed 2-pixel tolerance.
+    nsd_tolerance_px: null
+
+    # Statistical inference
+    bootstrap_samples: 10000
+    permutation_samples: 100000
+    statistics_seed: 42
+
+    # Patient-level clustering
+    cluster_key: patient_id
+
+    # Optional:
+    # case_id,patient_id,eye,reference_complete
+    metadata_csv: null
+
+    # Optional baseline per_case.csv for paired statistics
+    reference_csv: null
+
 # ── Multi-task model knobs (Phase 9b; merged into the selected model config) ──
 # All OFF by default. Consumed by future custom models that expose decoder
 # features / heads; SMP baselines ignore them, so the baseline is unaffected.

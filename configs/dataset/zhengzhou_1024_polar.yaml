@@ -1,0 +1,8 @@
+name: zhengzhou_1024_polar
+root: /data2/ziyue_data/zhengzhou_external_hmx
+mask_dir: masks_semantic
+mask_mode: index
+num_classes: 3
+class_names: [background, OD, PPA]
+# Foreground class indices used to compute mean Dice/IoU (excludes background)
+foreground_classes: [1, 2]

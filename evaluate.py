@@ -33,8 +33,37 @@ def main(cfg: DictConfig) -> None:
     split = cfg.split
     datamodule = SegDataModule(cfg, eval_split=split)
 
+    odppa_cfg = (
+        (cfg.get("eval", {}) or {}).get(
+            "odppa",
+            {},
+        ) or {}
+    )
+
+    if odppa_cfg.get("enabled", False):
+
+        if (
+            int(cfg.dataset.num_classes) < 3
+            or str(cfg.dataset.mask_mode) != "index"
+        ):
+            raise ValueError(
+                "OD/PPA evaluation requires "
+                "multiclass index masks."
+            )
+
+        if (
+            bool(cfg.polar.enabled)
+            and str(
+                cfg.polar.eval.metric_space
+            ).lower() != "cart"
+        ):
+            raise ValueError(
+                "OD/PPA evaluation requires "
+                "polar.eval.metric_space=cart."
+            )
+
     # Load model weights from checkpoint; architecture is defined by cfg
-    model = SegModule.load_from_checkpoint(ckpt_path, cfg=cfg)
+    model = SegModule.load_from_checkpoint(ckpt_path, strict=False, cfg=cfg)
     model.eval_split = split  # ensure metric keys reflect the actual split
 
     run_name = f"{cfg.logging.name}_eval_{split}"

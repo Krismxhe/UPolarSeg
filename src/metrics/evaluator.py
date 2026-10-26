@@ -178,6 +178,22 @@ class SegEvaluator:
     # ── Write ──────────────────────────────────────────────────────────────────
     def write(self, records: List[dict], output_dir) -> Dict[str, str]:
         out = ensure_dir(output_dir)
+
+        eval_cfg = self.cfg.get("eval", {}) or {}
+        odppa_cfg = eval_cfg.get("odppa", {}) or {}
+
+        if bool(
+            odppa_cfg.get(
+                "enabled",
+                False,
+            )
+        ):
+            return self._write_odppa(
+                records,
+                out,
+                odppa_cfg,
+            )
+
         per_class_rows = self._per_class_rows(records) if records else []
         summary_row = self._summary_row(per_class_rows, len(records))
 
@@ -201,6 +217,114 @@ class SegEvaluator:
 
         for writer in self._extra_writers:
             writer(records, out)
+        return written
+
+    def _write_odppa(self, records: List[dict], out, odppa_cfg) -> Dict[str, str]:
+        """Write the OD/PPA paper-evaluation CSVs from one scalar record per case."""
+        import csv
+        import math
+
+        from src.metrics.odppa_stats import compare_records, summarize_records
+
+        n_boot = int(odppa_cfg.get("bootstrap_samples", 10000))
+        n_perm = int(odppa_cfg.get("permutation_samples", 100000))
+        seed = int(odppa_cfg.get("statistics_seed", 42))
+        cluster_key = str(odppa_cfg.get("cluster_key", "patient_id"))
+
+        # Reject accidental duplicate case IDs before any aggregation.
+        ids = [str(r.get("case_id", "")) for r in records]
+        if len(ids) != len(set(ids)):
+            raise ValueError("Duplicate case_id values remain after test collection; refusing CSV export.")
+
+        common = {
+            "run_name": self.run_name, "checkpoint": self.checkpoint,
+            "dataset": self.dataset_name, "split": self.split,
+            "model": self.model_name, "encoder": self.encoder,
+        }
+
+        scalar_fields = [
+            "protocol_version", "case_id", "patient_id", "eye", "image_path", "mask_path",
+            "reference_complete", "eval_height", "eval_width",
+            "gt_od_area_px", "pred_od_area_px", "gt_ppa_area_px", "pred_ppa_area_px",
+            "gt_od_equiv_diameter_px", "nsd_tolerance_px",
+            "od_reference_valid", "od_pred_empty", "od_dsc", "od_nsd",
+            "od_hd95_px", "od_hd95_norm", "od_hd95_valid",
+            "ppa_status", "ppa_pred_empty", "ppa_dsc", "ppa_nsd",
+            "ppa_hd95_px", "ppa_hd95_norm", "ppa_hd95_valid",
+            "ppa_negative_correct", "ppa_fp_norm", "pred_path",
+        ]
+        per_case_rows = []
+        for r in records:
+            row = {**common}
+            row.update({k: r.get(k, "") for k in scalar_fields})
+            per_case_rows.append(row)
+        per_case_fields = list(common) + scalar_fields
+
+        metrics = summarize_records(
+            records, n_boot=n_boot, seed=seed, cluster_key=cluster_key
+        )
+        metric_rows = [{**common, **m} for m in metrics]
+        metric_fields = list(common) + [
+            "target", "subgroup", "metric", "unit", "higher_is_better",
+            "estimate", "sd", "ci_lower", "ci_upper", "ci_method", "ci_status",
+            "n_eligible_cases", "n_valid_cases", "n_patients", "numerator", "denominator",
+        ]
+
+        summary = dict(common)
+        summary.update({
+            "num_cases": len(records),
+            "num_patients": len({str(r.get(cluster_key) or r.get("case_id")) for r in records}),
+            "num_od_valid": sum(bool(r.get("od_reference_valid")) for r in records),
+            "num_ppa_positive": sum(r.get("ppa_status") == "positive" for r in records),
+            "num_ppa_negative": sum(r.get("ppa_status") == "negative" for r in records),
+            "num_ppa_unknown": sum(r.get("ppa_status") == "unknown" for r in records),
+            "cluster_key": cluster_key,
+            "bootstrap_samples": n_boot, "statistics_seed": seed,
+        })
+        for m in metrics:
+            prefix = f"{str(m['target']).lower()}_{m['subgroup']}_{m['metric']}".replace("-", "_")
+            summary[f"{prefix}_mean"] = m["estimate"]
+            summary[f"{prefix}_sd"] = m["sd"]
+            summary[f"{prefix}_ci_lower"] = m["ci_lower"]
+            summary[f"{prefix}_ci_upper"] = m["ci_upper"]
+            summary[f"{prefix}_n"] = m["n_valid_cases"]
+
+        written = {}
+        written["per_case"] = str(write_csv(out / "per_case.csv", per_case_rows, per_case_fields))
+        written["metrics"] = str(write_csv(out / "metrics.csv", metric_rows, metric_fields))
+        written["summary"] = str(write_csv(out / "summary.csv", [summary], list(summary.keys())))
+        written["config"] = str(write_resolved_config(out / "config.yaml", self.cfg))
+
+        reference_csv = odppa_cfg.get("reference_csv", None)
+        if reference_csv:
+            from hydra.utils import to_absolute_path
+            ref_path = to_absolute_path(str(reference_csv))
+            with open(ref_path, newline="") as f:
+                raw = list(csv.DictReader(f))
+
+            def parse(v):
+                if v is None or v == "":
+                    return float("nan")
+                lv = str(v).lower()
+                if lv in {"true", "false"}:
+                    return lv == "true"
+                try:
+                    return float(v)
+                except ValueError:
+                    return v
+
+            reference = [{k: parse(v) for k, v in row.items()} for row in raw]
+            comparison = compare_records(
+                records, reference, n_boot=n_boot, n_perm=n_perm, seed=seed, cluster_key=cluster_key
+            )
+            comp_rows = [{**common, "reference_csv": ref_path, **r} for r in comparison]
+            comp_fields = list(common) + ["reference_csv", "target", "subgroup", "metric",
+                "higher_is_better", "n_paired_cases", "n_paired_patients",
+                "estimate_current", "estimate_reference", "delta_current_minus_reference",
+                "delta_ci_lower", "delta_ci_upper", "test_method", "p_raw",
+                "p_adjusted", "adjustment_status"]
+            written["comparison"] = str(write_csv(out / "comparison.csv", comp_rows, comp_fields))
+
         return written
 
     # ── Optional multi-task writers (Phase 9b) ────────────────────────────────

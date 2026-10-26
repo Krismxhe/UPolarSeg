@@ -1,0 +1,25 @@
+# @package quantification
+
+enabled: true
+
+# Pilot starting value; not an empirically optimized weight.
+weight: 0.05
+
+# Mutually exclusive semantic classes.
+od_class: 1
+ppa_class: 2
+
+# Fixed vertical axis in the standardized Cartesian ROI.
+# OpenCV polar angle 0 follows the positive image x-axis.
+vertical_angle_deg: 90.0
+
+# Numerical denominator protection, in resized Cartesian ROI pixels.
+denominator_floor_px: 1.0
+
+# radial quantification adapter
+adapter_enabled: false
+
+adapter:
+  hidden_channels: 8
+  max_logit_shift: 1.0
+  lr: 0.001

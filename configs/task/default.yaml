@@ -13,6 +13,7 @@ outputs:
     source: decoder_final_feature
     target_type: binary_boundary
     boundary_width_px: 3
+    loss_weight: 0.1
   clinical:
     enabled: false
     mode: deterministic_from_prediction

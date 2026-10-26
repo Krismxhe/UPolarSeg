@@ -39,7 +39,7 @@ def build_transforms(cfg, split: str = 'train') -> A.Compose:
     Returns:
         albumentations.Compose pipeline.
     """
-        
+    compose_seed = int(cfg.train.seed)
     aug      = cfg.augmentation
     img_size = cfg.train.img_size
     mean     = list(aug.normalize.mean)
@@ -122,4 +122,7 @@ def build_transforms(cfg, split: str = 'train') -> A.Compose:
     pipeline.append(A.Normalize(mean=mean, std=std))
     pipeline.append(ToTensorV2())
 
-    return A.Compose(pipeline)
+    return A.Compose(
+        pipeline,
+        seed=compose_seed,
+    )
