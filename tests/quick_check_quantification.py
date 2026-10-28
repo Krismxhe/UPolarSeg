@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 
-from src.losses.polar_quantification import (
+from ..src.losses.polar_quantification import (
     PolarQuantificationLoss,
 )
 
@@ -14,6 +14,7 @@ q = PolarQuantificationLoss(
     ),
     max_radius=32.0,
     vertical_angle_deg=90.0,
+    dv_mode="fixed_vertical",
 )
 
 # Shape: [B, angle, radius].
@@ -94,4 +95,31 @@ print(
 print(
     "Soft/hard identity, invalid OD "
     "and gradient checks passed."
+)
+
+# Same mask and origin, a different diameter definition selected explicitly.
+q_max = PolarQuantificationLoss(
+    valid_grid=q.valid_grid,
+    max_radius=q.max_radius,
+    dv_mode="max_center_chord",
+)
+hard_max = q_max.measure_mask(y)
+soft_max = q_max.read_probabilities(p)
+assert hard_max["reference_valid"].item()
+assert hard_max["dv"].item() == 28.0  # 0/180 degrees: 15 + 13.
+assert hard_max["pmw"].item() == 5.0
+assert torch.allclose(hard_max["pvdr"], torch.tensor([5.0 / 28.0]))
+for key in ("pmw", "dv", "pvdr"):
+    assert torch.allclose(soft_max[key], hard_max[key])
+
+z_max = z.detach().clone().requires_grad_()
+loss_max, _ = q_max(z_max, y)
+loss_max.backward()
+assert torch.isfinite(loss_max)
+assert torch.isfinite(z_max.grad).all()
+assert z_max.grad.abs().sum() > 0
+print(
+    f"max_center_chord: PMW={hard_max['pmw'].item():.4f} px, "
+    f"Dv={hard_max['dv'].item():.4f} px, PVDR={hard_max['pvdr'].item():.6f}; "
+    "soft/hard and gradient checks passed."
 )

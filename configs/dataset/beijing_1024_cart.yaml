@@ -1,5 +1,5 @@
 name: beijing_1024_cart
-root: /data2/ziyue_data/fundus_od_ppa_hmx/dataset_1024
+root: /data2/ziyue_data/dataset_v2/anyang_cropped_1024_v2
 mask_dir: masks_semantic
 mask_mode: index
 num_classes: 3

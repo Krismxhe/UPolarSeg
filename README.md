@@ -1,409 +1,263 @@
-# seg-baseline
+# Dv 两种计算方法：手动合入包
 
-A lightweight, config-driven research framework for **2D medical image
-segmentation**. It pairs a fair, shared training/evaluation pipeline with a
-clean separation between established baselines and your own research models, so
-comparisons stay honest and new methods are easy to add.
+本包保留原固定轴定义 `fixed_vertical`，新增 `max_center_chord`，由 config 选择。
+默认值仍为 `fixed_vertical`，未配置新字段时延续旧行为。
 
-Built on [Segmentation Models PyTorch](https://github.com/qubvel-org/segmentation_models.pytorch) (SMP),
-[PyTorch Lightning](https://lightning.ai/), and [Hydra](https://hydra.cc/).
+## 包内内容与适用基线
 
-## Key features
+- `updated_files/`：本次全部 10 个改动/新增文件的完整版本，目录结构与项目一致。
+- `dv_modes.patch`：只包含本次 Dv 功能的增量补丁。
+- `changed_files.json`：逐文件的基线与新文件 SHA-256。
+- `validation.json`：验证结果、运行环境及未覆盖范围。
+- `updated_files/docs/DV_MODES.md`：两种定义、单位、hard/soft 及记录协议的详细说明。
 
-- **Config-driven** — swap model, backbone, loss, optimizer, and augmentation
-  from the command line; no code changes.
-- **Three model layers, one pipeline** — `smp` (SMP architectures), `baseline`
-  (established non-SMP baselines such as TransUNet), and `research` (your own
-  methods such as ModularUNet). Implementations are separated; dataset,
-  augmentation, loss, optimizer, trainer, and evaluator are shared — so a
-  baseline and a research model are compared under identical conditions.
-- **Multi-class and binary** segmentation through a single code path.
-- **Explicit evaluation CSVs** — `summary.csv`, `per_class.csv`, and
-  `per_case.csv` written on every evaluation run, ready for analysis.
-- **Unified output contract** — a model may return a logits tensor or a dict;
-  the framework normalizes both, so multi-output models drop in without touching
-  the training loop.
-- **Reproducible experiments** — pinned Hydra experiment configs you run with
-  `+experiment=<name>`, each saving its fully-resolved config alongside results.
+补丁基于此前提供的 `medseg_research.zip`，不重复包含 mask 导出、依赖或其他功能修改。
+如果你已手动修改过文件，请按下列函数/位置合并；不要直接覆盖自己的其他改动。
 
-## Installation
+## 必须合入的 3 个主要文件
 
-```bash
-pip install -r requirements.txt
-```
-
-Key dependencies: `torch`, `pytorch-lightning`, `segmentation-models-pytorch`,
-`albumentations`, `hydra-core`, `torchmetrics` (plus `pytest` for tests).
-
-## Quickstart
-
-```bash
-# train a UNet/ResNet34 baseline (defaults: multiclass, dice_ce)
-python train.py model=smp/unet
-
-# evaluate a checkpoint and write CSVs
-python evaluate.py checkpoint=outputs/<name>/checkpoints/best.ckpt \
-    split=test eval.save_csv=true
-
-# run on a single image
-python predict.py --img path/to/image.png \
-    --checkpoint outputs/<name>/checkpoints/best.ckpt --out result.png
-```
-
-## Models — the three provider layers
-
-A model config carries a `provider` field, and `build_model` routes on it. The
-three layers separate *who owns the implementation*; everything downstream is
-shared (see [Shared pipeline](#shared-pipeline)).
-
-### `provider=smp` — SMP baselines
-
-Architectures built directly through `segmentation_models_pytorch`
-(`Unet`, `UnetPlusPlus`, `DeepLabV3Plus`, `FPN`, `MAnet`, …).
-
-```bash
-python train.py model=smp/unet
-python train.py model=smp/deeplabv3plus model.encoder=resnet50
-python train.py model=smp/unetplusplus model.encoder=resnet50
-
-# legacy configs without a provider field still resolve to smp
-python train.py model=unet
-```
-
-### `provider=baseline` — established non-SMP baselines
-
-Baselines SMP does not provide. **TransUNet** ships today — a hybrid model where
-an SMP ResNet50 backbone feeds its stride-16 feature map to a ViT encoder, then a
-cascaded decoder with CNN skip connections restores full resolution. (UNETR /
-SwinUNETR are on the roadmap.)
-
-```bash
-python train.py model=baseline/transunet train.img_size=224
-```
-
-> `img_size` must be divisible by `patch_size` (16). The ResNet backbone is
-> ImageNet-initialised via `model.encoder_weights`; the transformer trains from
-> scratch unless `model.pretrained_path` points to a compatible torch
-> `state_dict` of this model (see [Limitations](#limitations)).
-
-### `provider=research` — your own methods
-
-User-owned research implementations. **ModularUNet** ships today — a controllable
-UNet (SMP encoder + a custom decoder) for skip-connection research; it currently
-provides the `identity` skip as an ablation control.
-
-```bash
-python train.py model=research/modular_unet_identity
-python train.py model=research/modular_unet model.skip.name=identity
-```
-
-> `img_size` must be divisible by 32 (resnet-style 5-stage encoder).
-
-### `provider=custom` — deprecated alias
-
-Kept only so old configs and commands keep working: it maps `custom/transunet →
-baseline/transunet` and `custom/modular_unet → research/modular_unet`. Prefer
-`baseline` / `research` in new work — see [Migration](#migration).
-
-## Shared pipeline
-
-Every provider shares one pipeline, so the only thing that differs between a
-baseline run and a research run is the model (unless an experiment deliberately
-studies another factor):
-
-- dataset, datamodule, and augmentation
-- the batch contract and the model **output contract**
-- the loss factory, optimizer, and scheduler
-- the Lightning trainer and the LightningModule
-- the evaluator and its `summary` / `per_class` / `per_case` CSV schema
-
-The training module imports no concrete model class, and neither the evaluator
-nor the loss branches on provider. Same data, same metrics, same CSVs — that is
-what keeps baseline-vs-research comparisons fair.
-
-## Migration
-
-Nothing breaks: old configs and commands still run via the deprecated `custom`
-alias and flat experiment wrappers. Preferred new forms:
-
-| Old | New |
+| 文件 | 需要合入的位置 |
 |---|---|
-| `model=custom/transunet` | `model=baseline/transunet` |
-| `model=custom/modular_unet` | `model=research/modular_unet_identity` (or `model=research/modular_unet`) |
-| `+experiment=transunet_r50_vit_b16` | `+experiment=baselines/transunet_r50_vit_b16` |
-| `+experiment=modular_unet_identity` | `+experiment=research/modular_unet_identity` |
+| `configs/quantification/pmw_pvdr.yaml` | 新增 `dv_mode`，注明固定轴角度的适用模式 |
+| `src/quantification/polar_readout.py` | helper、构造参数与校验、共享 `_summarize`、builder 参数、metadata |
+| `src/evaluation/quantification_records.py` | 新协议常量及 `quantification_protocol()` |
 
-A standalone guide lives in [`docs/MIGRATION.md`](docs/MIGRATION.md).
+### 1. configs/quantification/pmw_pvdr.yaml
 
-## Datasets
-
-```
-your-dataset/
-├── train/
-│   ├── images/        ← RGB images (.png / .jpg)
-│   └── <mask_dir>/    ← masks (.png, same stem as the image)
-├── val/   …
-└── test/  …
-```
-
-| `mask_mode` | pixel values | use case |
-|---|---|---|
-| `index`  | 0, 1, 2, … (class indices) | multi-class |
-| `binary` | 0 / 255 → auto-converted to 0 / 1 | binary |
-
-### Binary vs multi-class
-
-| | binary | multi-class |
-|---|---|---|
-| `num_classes` | 1 | > 1 |
-| model output | `B×1×H×W` | `B×C×H×W` |
-| prediction | `sigmoid(logits) > eval.threshold` | `argmax(logits, dim=1)` |
-| loss | `dice_bce` | `dice_ce` |
-| mean metrics | the single foreground class | over `foreground_classes` (background excluded by default) |
-
-### Add a dataset
-
-Copy `configs/dataset/multiclass.yaml` (or `binaryclass.yaml`), edit, and run
-`python train.py dataset=my_dataset`:
+在现有 `vertical_angle_deg` 附近加入：
 
 ```yaml
-name: my_dataset
-root: /path/to/dataset
-mask_dir: masks
-mask_mode: index
-num_classes: 3
-class_names: [background, class_a, class_b]
-foreground_classes: [1, 2]   # used for mean Dice/IoU (excludes background)
+# fixed_vertical | max_center_chord
+dv_mode: fixed_vertical
+
+# Only used by fixed_vertical.
+vertical_angle_deg: 90.0
 ```
 
-## Loss
+此配置组文件已有 `# @package quantification`，这里不再套一层 `quantification:`。
+需要新方式时改为 `dv_mode: max_center_chord`。
+也可以在原有训练/评估命令中覆盖 `quantification.dv_mode=max_center_chord`。
+如果尚未选择该配置组，先添加 `+quantification=pmw_pvdr`；已有配置组时无需再次添加。
 
-The loss is selected by the dataset's task type:
+### 2. src/quantification/polar_readout.py
 
-| Loss | Task (`num_classes`) | Composition |
-|---|---|---|
-| `dice_ce` (default) | multi-class (> 1) | Dice + CrossEntropy |
-| `dice_bce` | binary (== 1) | Dice + BCEWithLogits |
-
-```bash
-python train.py loss=dice_ce                      # default (multi-class)
-python train.py dataset=binaryclass loss=dice_bce # binary
-```
-
-Losses are computed from logits — models never apply sigmoid/softmax. Using
-`dice_ce` on a binary task (or vice versa) raises a clear error.
-
-## Training
-
-```bash
-python train.py                       # UNet + ResNet34, multiclass, dice_ce
-python train.py train.batch_size=4 train.epochs=200 train.img_size=640
-python train.py optimizer=sgd optimizer.lr=1e-2 augmentation=heavy
-
-# multi-GPU / mixed precision, and Hydra multirun sweeps
-python train.py hardware.devices=4 hardware.strategy=ddp train.precision=16-mixed
-python train.py --multirun model=smp/unet,smp/unetplusplus model.encoder=resnet34,resnet50
-```
-
-## Experiments & reproducibility
-
-Pinned configurations live in `configs/experiment/`, grouped into `baselines/`,
-`research/`, and `ablations/`. Run one with the append (`+`) syntax:
-
-```bash
-python train.py +experiment=baselines/smp_unet_resnet34
-python train.py +experiment=baselines/smp_deeplabv3plus_resnet50
-python train.py +experiment=baselines/transunet_r50_vit_b16 train.img_size=224
-python train.py +experiment=research/modular_unet_identity
-
-# seed sweep
-python train.py --multirun +experiment=research/modular_unet_identity train.seed=42,43,44
-```
-
-Each experiment pins the model, dataset, augmentation, optimizer, loss,
-`train.img_size`, `train.seed`, and a stable `logging.name`; the fully-resolved
-config is saved next to the evaluation CSVs. See
-[`configs/experiment/README.md`](configs/experiment/README.md) for the full list,
-the flat-name compatibility wrappers, and the (not-yet-runnable) ablation
-templates.
-
-## Evaluation & CSV outputs
-
-```bash
-python evaluate.py checkpoint=outputs/<name>/checkpoints/best.ckpt split=test eval.save_csv=true
-python evaluate.py checkpoint=outputs/<name>/checkpoints/best.ckpt split=val
-```
-
-Alongside the printed metric table, CSVs are written to
-`outputs/<logging.name>/eval/<split>/`:
-
-| file | one row per | key columns |
-|---|---|---|
-| `summary.csv` | evaluation run | `num_cases, mean_dice, mean_iou, mean_precision, mean_recall` (+ run/model/encoder) |
-| `per_class.csv` | class | `class_id, class_name, dice, iou, precision, recall, support_pixels` |
-| `per_case.csv` | case | `case_id, image_path, mask_path, dice_mean, iou_mean, precision_mean, recall_mean, pred_path` (+ per-class columns) |
-| `config.yaml` | — | the fully-resolved config |
-
-Relevant `eval.*` switches (`configs/train.yaml`):
-
-```yaml
-eval:
-  save_csv: true
-  threshold: 0.5            # binary prediction threshold
-  include_background: false # include background in mean_* if true
-  output_dir: null          # default: <save_dir>/<logging.name>/eval/<split>
-  per_case: true
-  per_class: true
-```
-
-### Metric conventions
-
-- Aggregation is **macro**: per-case metrics are averaged across cases, and the
-  summary averages over foreground classes (background excluded unless
-  `include_background=true`).
-- **Empty masks** are handled explicitly so metrics never become `NaN`:
-  - pred empty **and** target empty → `dice = 1, iou = 1`
-  - pred non-empty **and** target empty → `dice = 0, iou = 0`
-  - pred empty **and** target non-empty → `dice = 0, iou = 0`
-  - precision / recall follow the same rule.
-
-## Optional eval outputs
-
-Two extra, evaluation-only metric families can be enabled per run. Both are
-deterministic and derived from the predicted segmentation — they do not require a
-specialized model head.
-
-```bash
-# clinical morphology metrics → clinical_metrics.csv (one row per case)
-python evaluate.py checkpoint=... split=test task.outputs.clinical.enabled=true
-
-# boundary metrics → boundary_metrics.csv (boundary dice/iou per class + means)
-python evaluate.py checkpoint=... split=test \
-    task.outputs.boundary.enabled=true task.outputs.boundary.boundary_width_px=3
-```
-
-Clinical metrics are reported in **pixel units** (each row carries a `unit`
-column). Both are off by default and never enter the training loss.
-
-## Output contract
-
-A model's `forward` may return either a logits tensor `B×C×H×W` or a dict that
-contains at least `seg_logits`:
+#### 2.1 保留 `_opposite_vertical()`，在它后面新增以下函数
 
 ```python
-logits = model(images)
-# or
-{
-    "seg_logits": seg_logits,
-    "boundary_logits": ...,   # optional
-    "clinical": ...,          # optional
-    "features": ...,          # optional
-}
+def _max_center_chord(profile: Tensor) -> Tensor:
+    """Longest opposite-ray sum through the polar origin.
+
+    ``profile[..., i]`` is the OD radius at angle ``2*pi*i/A``. Even angular
+    grids have an exact opposite row. On odd grids, the opposite direction
+    lies halfway between two rows and uses periodic linear interpolation.
+    Maximize the paired sum, rather than choosing the longest single radius.
+    """
+    if profile.ndim < 1 or profile.shape[-1] == 0:
+        raise ValueError("OD profile must have a nonempty angle dimension.")
+    angles = profile.shape[-1]
+    half = angles // 2
+    opposite = torch.roll(profile, shifts=-half, dims=-1)
+    if angles % 2:
+        opposite = 0.5 * (
+            opposite + torch.roll(profile, shifts=-(half + 1), dims=-1)
+        )
+    return (profile + opposite).amax(dim=-1)
 ```
 
-The framework normalizes both forms before computing loss and metrics, so a
-multi-output model integrates without changing the training loop. A dict missing
-`seg_logits` raises a clear error.
+该函数输入是 `[batch, angle_bins]` 的半径 profile，最后一维表示角度，已经是长度单位。
+因此在这里不再乘 `dr`。偶数角度行直接配对；奇数行的对向角度使用周期线性插值。
 
-## Extending the framework
-
-### Add a baseline model (`provider=baseline`)
-
-1. Implement the `torch.nn.Module` under `src/models/baselines/<new_model>/`.
-2. Register a builder in `src/models/baselines/registry.py`.
-3. Add `configs/model/baseline/<new_model>.yaml` with `provider: baseline`,
-   `name`, and `arch:` + `encoder:` labels (used for the run name).
-4. Make `forward` honour the [output contract](#output-contract).
-5. Add a forward-shape test (see `tests/test_smoke.py`).
-
-### Add a research model (`provider=research`)
-
-1. Implement the `torch.nn.Module` under `src/models/research/<your_method>/`
-   (`ResearchModel` in `src/models/research/base.py` is an optional base).
-2. Register a builder in `src/models/research/registry.py`.
-3. Add `configs/model/research/<your_method>.yaml` with `provider: research`,
-   `name`, and `arch:` + `encoder:` labels.
-4. Make `forward` honour the [output contract](#output-contract); emit
-   `boundary_logits` / `clinical` / `features` if your method produces them.
-5. Add a forward-shape test, and don't modify the shared pipeline.
-
-Registries are the only place model names are dispatched — `factory.py` and the
-LightningModule stay untouched. Baseline and research code must not import each
-other's internals.
-
-### Add a skip module (ModularUNet)
+#### 2.2 在 `PolarReadout.__init__()` 参数列表末尾追加
 
 ```python
-# src/models/research/modular_unet/skip_modules.py
-class MySkip(SkipModule):
-    def forward(self, skip, decoder_feature=None, level: int = 0):
-        return skip  # must preserve spatial size
-SKIP_MODULES["my_skip"] = MySkip
+dv_mode: str = "fixed_vertical",
 ```
 
-Select it with `model.skip.name=my_skip` and ablate against the identity skip:
+在构造函数现有参数校验区加入：
+
+```python
+self.dv_mode = str(dv_mode).strip().lower()
+if self.dv_mode not in {"fixed_vertical", "max_center_chord"}:
+    raise ValueError(
+        "quantification.dv_mode must be 'fixed_vertical' or "
+        f"'max_center_chord', got {dv_mode!r}."
+    )
+```
+
+保留原 `self.vertical_angle_deg` 字段及校验。它只决定固定轴模式的方向。
+
+#### 2.3 在 `_summarize()` 内替换 Dv 的一行计算
+
+原来：
+
+```python
+dv = _opposite_vertical(od, self.vertical_angle_deg)
+```
+
+替换为：
+
+```python
+if self.dv_mode == "max_center_chord":
+    dv = _max_center_chord(od)
+else:
+    dv = _opposite_vertical(od, self.vertical_angle_deg)
+```
+
+保留周围的 `pmw = width.amax(dim=-1)`、返回字典和 PVDR 分母保护。
+现有 `pvdr = pmw / dv.clamp_min(self.denominator_floor_px)` 自然使用所选 Dv。
+
+#### 2.4 在 `_build_polar_readout()` 的 `readout_type(...)` 调用中追加
+
+```python
+dv_mode=q.get("dv_mode", "fixed_vertical"),
+```
+
+这样 `build_polar_readout()` 和量化 loss 的 builder 都能使用配置。
+旧配置没有此字段时仍回退到固定轴。
+
+#### 2.5 在该 builder 的 `readout.geometry_metadata = {...}` 后、`return readout` 前加入
+
+```python
+if readout.dv_mode == "max_center_chord":
+    readout.geometry_metadata.pop("vertical_angle_deg", None)
+    readout.geometry_metadata.update({
+        "dv_mode": readout.dv_mode,
+        "diameter_definition": "max_theta[r(theta)+r(theta+pi)]",
+        "opposite_angle_deg": 180.0,
+        "opposite_interpolation": "periodic_linear",
+    })
+```
+
+### 3. src/evaluation/quantification_records.py
+
+在原协议常量附近加入一行，旧常量值不变：
+
+```python
+QUANTIFICATION_SCHEMA_VERSION = "quantification-v1"
+QUANTIFICATION_PROTOCOL = "polar-radial-v1"
+MAX_CENTER_CHORD_PROTOCOL = "polar-radial-v2"  # added
+```
+
+将现有 `quantification_protocol()` 替换为以下完整版本。
+此文件已有 `hashlib`、`json` 及 `_python_values()`，无需新增依赖。
+
+```python
+def quantification_protocol(readout) -> dict:
+    """Identify the sampling grid and the diameter definition actually used.
+
+    Fixed-axis readouts retain the original v1 geometry encoding so their CSVs
+    remain comparable with existing runs. The maximum centre chord is a separate
+    v2 protocol; its geometry excludes the unused fixed-axis angle, including any
+    stale copy in ``geometry_metadata``.
+    """
+    dv_mode = str(getattr(readout, "dv_mode", "fixed_vertical")).strip().lower()
+    if dv_mode not in {"fixed_vertical", "max_center_chord"}:
+        raise ValueError(f"Unsupported quantification dv_mode: {dv_mode!r}")
+    geometry = dict(getattr(readout, "geometry_metadata", {}))
+    # These descriptors did not exist in v1. Resolve them from the actual mode,
+    # rather than trusting copied metadata or changing a fixed-axis run's hash.
+    for key in ("dv_mode", "diameter_definition", "opposite_interpolation", "opposite_angle_deg"):
+        geometry.pop(key, None)
+    geometry.update({
+        "angle_bins": int(readout.angle_bins),
+        "radius_bins": int(readout.radius_bins),
+        "max_radius": float(readout.max_radius),
+        "od_class": int(readout.od_class),
+        "ppa_class": int(readout.ppa_class),
+        "denominator_floor_px": float(readout.denominator_floor_px),
+        "mode": "linear", "radial_step": "max_radius/radius_bins",
+        "origin_weight": 0, "length_unit": "resized_roi_px",
+    })
+    if dv_mode == "max_center_chord":
+        geometry.pop("vertical_angle_deg", None)
+        geometry.pop("vertical_angle", None)
+        geometry.update({
+            "dv_mode": dv_mode,
+            "diameter_definition": "max_theta[r(theta)+r(theta+pi)]",
+            "opposite_angle_deg": 180.0,
+            "opposite_interpolation": "periodic_linear",
+        })
+        protocol_name = MAX_CENTER_CHORD_PROTOCOL
+    else:
+        geometry["vertical_angle_deg"] = float(readout.vertical_angle_deg)
+        protocol_name = QUANTIFICATION_PROTOCOL
+    grid = _python_values(readout.valid_grid)
+    geometry["valid_grid_sha256"] = hashlib.sha256(
+        bytes(int(value) for row in grid for value in row)
+    ).hexdigest()
+    encoded = json.dumps(geometry, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {
+        "quant_schema_version": QUANTIFICATION_SCHEMA_VERSION,
+        "quant_protocol": protocol_name,
+        "quant_geometry_id": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "quant_geometry_json": encoded,
+        "quant_space": "resized_roi_polar",
+        "quant_length_unit": "resized_roi_px",
+    }
+```
+
+固定轴保留 v1 以及旧几何 hash；最大中心连线使用 v2，且不把无效的固定轴角度纳入 hash。
+原 `quantification_stats.py` 已检查 protocol/hash，不需要追加统计逻辑。
+两种 Dv 定义需要分别汇总，模型比较时用相同模式重新评估双方。
+
+## 其他改动：用于说明和验证
+
+| 文件 | 改动 | 运行新功能是否必须 |
+|---|---|---|
+| `src/quantification/hard_readout.py` | 注释由“vertical diameter”改为“selected diameter”，计算未变 | 否 |
+| `quick_check_quantification.py` | 保留 fixed 检查并新增 max 模式、PVDR 和梯度检查 | 否，建议加入 |
+| `tests/test_quantification_readouts.py` | 两模式、配置传递、旧数值和梯度回归 | 否，建议加入 |
+| `tests/test_quantification_pipeline.py` | 两模式的 SegModule、病例记录和协议集成 | 否，建议加入 |
+| `tests/test_max_center_chord.py` | 新增奇偶角度、对向和最大值、梯度、有效性测试 | 否，建议加入 |
+| `tests/test_dv_protocol.py` | 新增旧 hash 兼容及跨定义混用检查 | 否，建议加入 |
+| `docs/DV_MODES.md` | 新增完整定义说明 | 否，建议加入 |
+
+`src/quantification/soft_readout.py`、`src/losses/polar_quantification.py`、
+`src/evaluation/quantification_stats.py` 和冻结旧实现 fixture 保留原样。
+hard、soft 与 loss 共用 `_summarize()`，不需要分别复制新公式。
+此补丁面向当前 quantification 公共路径，未改动其他历史独立推理脚本。
+
+## 定义与实际结果示例
+
+固定轴：`Dv = r_OD(theta0) + r_OD(theta0 + pi)`，默认 theta0=90°。
+最大中心连线：`Dv = max_theta [r_OD(theta) + r_OD(theta + pi)]`。
+这里的 center 就是现有 Polar 原点（图像左侧 r=0），不重新估算中心。
+应当先对每组相反方向求和再取最大值，不能先选最长单边半径。
+
+例如 8 个方向的半径为 `[15, 9, 6, 8, 13, 10, 12, 7]`、PMW=5：
+
+| 模式 | Dv | PVDR |
+|---|---:|---:|
+| fixed_vertical (90°/270°) | 6 + 12 = 18 | 5/18 = 0.277778 |
+| max_center_chord | 15 + 13 = 28 | 5/28 = 0.178571 |
+
+hard 用 OD 边界半径；soft 用可微的径向概率占据长度，并应用同样的聚合方法。
+两者并非对任意概率输入都数值相等。单位仍是 resize 后 Cartesian ROI 的像素，
+与导出的 mask 是否恢复原图大小无关。
+
+## 已完成验证与本地验证命令
+
+已在真实 PyTorch 2.12.1 CPU 环境通过 **111 个 pytest 用例和 16 个统计子测试**，
+全部 0 失败、0 跳过；含 autograd、旧实现数值/梯度回归和真实 SegModule 小模型集成。
+`quick_check_quantification.py` 也已执行，两种模式均有有限、非零梯度。
+补丁已通过 `git apply --check`，实际应用后 10 个文件均与包内最终文件逐字节一致。
+
+本地验证：
 
 ```bash
-python train.py --multirun model=research/modular_unet \
-    model.skip.name=identity,my_skip train.seed=42,43,44
+python -m pytest tests/test_max_center_chord.py tests/test_dv_protocol.py \
+  tests/test_quantification_readouts.py tests/test_quantification_pipeline.py \
+  tests/test_quantification_statistics.py -q
+python quick_check_quantification.py
 ```
 
-## Project structure
-
-```
-├── configs/
-│   ├── train.yaml              ← main config (model/dataset/aug/optimizer/loss/task)
-│   ├── model/{smp,baseline,research,custom}/
-│   ├── dataset/  augmentation/  optimizer/  loss/  task/
-│   └── experiment/{baselines,research,ablations}/
-├── src/
-│   ├── datasets/               ← dataset + dict batch contract
-│   ├── models/
-│   │   ├── factory.py          ← build_model (the provider router)
-│   │   ├── smp_models.py  outputs.py  seg_module.py
-│   │   ├── baselines/          ← registry + transunet/
-│   │   └── research/           ← registry, base, modular_unet/
-│   ├── losses/  metrics/  tasks/  transforms/  utils/
-├── train.py   evaluate.py   predict.py
-├── tests/test_smoke.py
-└── requirements.txt
-```
-
-## Limitations
-
-- **TransUNet pretrained weights** — only a partial torch `state_dict` load
-  (`strict=False`) is supported; the official Google ViT/R50 `.npz` weights are
-  not. The transformer trains from scratch unless given a compatible checkpoint.
-- **Clinical metrics are pixel-unit only** — no physical (mm / mm²) conversion.
-- **Boundary metrics are derived from the segmentation prediction** — there is no
-  learned boundary head or boundary loss in training.
-- **Multi-output training** — the clinical/boundary outputs are evaluation-only;
-  joint multi-task training is not yet available.
-- **Extra skip modules** (scse, cbam, …) are not implemented yet; only `identity`
-  ships.
-- **CSV export is single-process** — run evaluation on a single device.
-
-## Smoke tests
+如果要自动合入，在项目根目录运行（路径替换为你解压后的实际位置）：
 
 ```bash
-python -m compileall src train.py evaluate.py predict.py
-pytest
-
-# 1-epoch end-to-end, small and offline
-python train.py model=smp/unet train.epochs=1 train.batch_size=2 train.num_workers=0 \
-    train.img_size=128 model.encoder_weights=null hardware.accelerator=cpu
+git apply --check /path/to/dv_modes_manual/dv_modes.patch
+git apply /path/to/dv_modes_manual/dv_modes.patch
 ```
 
-> Override the dataset location with `dataset.root=<path>` if needed.
-> `model.encoder_weights=null` avoids downloading ImageNet weights.
-
-## Reference
-
-**Optimizer / scheduler** (`configs/optimizer/*.yaml`): `optimizer.lr`,
-`optimizer.weight_decay`, `scheduler.name` (`cosine`, `step`, `plateau`, `none`).
-
-**Logs**: `tensorboard --logdir outputs/`
-
-**SMP architectures**: `Unet` · `UnetPlusPlus` · `MAnet` · `Linknet` · `FPN` ·
-`PSPNet` · `DeepLabV3` · `DeepLabV3Plus` · `PAN`.
-Encoder list: https://smp.readthedocs.io/en/latest/encoders.html
+如果检查提示上下文不匹配，请按上面的函数位置手动合并。
+本次未执行你的真实数据集训练、用户 checkpoint 评估、CUDA/AMP 或 DDP 测试。
+完整数值与几何说明见 `updated_files/docs/DV_MODES.md`。

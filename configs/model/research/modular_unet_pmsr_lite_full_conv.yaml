@@ -22,7 +22,7 @@ skip:
     min_hidden_channels: 16
 
     axis_conv_type: full # depthwise | group | full
-    axis_groups: 8
+    axis_groups: 1
 
     use_radius_coord: false
     use_radius_gate: false

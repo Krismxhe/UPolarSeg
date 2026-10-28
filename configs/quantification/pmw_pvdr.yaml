@@ -9,6 +9,8 @@ weight: 0.05
 od_class: 1
 ppa_class: 2
 
+# fixed_vertical | max_center_chord
+dv_mode: fixed_vertical
 # Fixed vertical axis in the standardized Cartesian ROI.
 # OpenCV polar angle 0 follows the positive image x-axis.
 vertical_angle_deg: 90.0

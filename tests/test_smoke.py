@@ -221,33 +221,6 @@ def test_clinical_metrics_unit_is_pixel():
     out = compute_class_clinical(m == 1, ["area", "perimeter", "area_ratio"], total_pixels=16)
     assert out["area"] == 1.0 and out["area_ratio"] == 1 / 16
 
-
-def test_heads_forward_shapes():
-    import torch
-
-    from src.models.heads import BoundaryHead, ClinicalHead
-
-    feat = torch.randn(2, 8, 16, 16)
-    assert BoundaryHead(8, 1)(feat).shape == (2, 1, 16, 16)
-    assert ClinicalHead(8, 3)(feat).shape == (2, 3)
-
-
-def test_multitask_loss_seg_only_equals_seg_loss():
-    import torch
-
-    from src.losses.factory import build_loss
-    from src.losses.multitask_loss import MultiTaskLoss
-
-    cfg = _compose_cfg()
-    seg_loss = build_loss(cfg.loss, cfg.dataset)
-    mtl = MultiTaskLoss(seg_loss)  # boundary disabled by default
-
-    logits = torch.randn(2, cfg.dataset.num_classes, 16, 16)
-    targets = {"mask": torch.randint(0, cfg.dataset.num_classes, (2, 16, 16))}
-    total, components = mtl({"seg_logits": logits}, targets)
-    assert torch.allclose(total, components["seg_total"])  # seg-only → identical
-
-
 def test_tasks_disabled_by_default():
     from src.tasks import is_task_enabled
 

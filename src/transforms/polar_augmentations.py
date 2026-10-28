@@ -8,9 +8,6 @@ import albumentations as A
 
 
 class CircularAngularShift(A.DualTransform):
-    """
-    沿角度轴做 circular shift, 等价于在 Cartesian 中绕 OD 中心旋转
-    """
 
     def __init__(self, max_shift_deg: float = 15.0, always_apply: bool = False, p: float = 0.5):
         super().__init__(always_apply=always_apply, p=p)

@@ -15,6 +15,8 @@ Metrics (per-class and mean, foreground only):
   - IoU (Jaccard)
 """
 
+import os
+
 import torch
 import torch.nn.functional as F
 import pytorch_lightning as pl
@@ -25,7 +27,7 @@ from torchmetrics.classification import (
 )
 from torchmetrics import MeanMetric
 
-from src.datasets.batch import unpack_batch
+from src.datasets.batch import original_size_from_metadata, unpack_batch
 from src.losses.factory import build_loss
 from src.models.factory import build_model
 from src.models.outputs import normalize_model_output
@@ -37,6 +39,14 @@ from src.losses.polar_quantification import (
 
 from src.models.research.residual_quant_logits import (
     ResidualQuantLogitsAdapter,
+)
+from src.quantification.polar_readout import build_polar_readout
+from src.quantification.diagnostics import compute_quantification_diagnostics
+from src.evaluation.quantification_records import (
+    apply_annotation_completeness,
+    build_quantification_case_records,
+    quantification_protocol,
+    unavailable_quantification_record,
 )
 
 class SegModule(pl.LightningModule):
@@ -89,7 +99,7 @@ class SegModule(pl.LightningModule):
                 for name in QUANT_VAL_KEYS
             })
 
-            if self.quant_cfg.adapter_enabled:
+            if bool(self.quant_cfg.get("adapter_enabled", False)):
                 self.adapter_cfg = self.quant_cfg.get("adapter") or {}
 
                 self.quant_head = ResidualQuantLogitsAdapter(
@@ -106,15 +116,6 @@ class SegModule(pl.LightningModule):
                     od_class=self.quantification.od_class,
                     ppa_class=self.quantification.ppa_class,
                 )
-
-                weights = (
-                    self.quantification.valid_grid.float()
-                    * (
-                        self.quantification.max_radius
-                        / self.quantification.radius_bins
-                    )
-                )
-                weights[:, 0] = 0.0
 
         # ── Metrics ───────────────────────────────────────────────────────────
         # torchmetrics >= 1.0 API
@@ -139,6 +140,7 @@ class SegModule(pl.LightningModule):
         # Per-case records collected during test_step → consumed by evaluate.py
         # to write explicit summary/per_class/per_case CSV (Phase 4).
         self.test_records = []
+        self._prediction_writer = None
 
         # Optional multi-task eval outputs (Phase 9b); default OFF so the
         # segmentation baseline is unaffected.
@@ -148,12 +150,7 @@ class SegModule(pl.LightningModule):
         self._clinical_metrics = list(get_output_cfg(cfg, 'clinical').get(
             'metrics', ['area', 'perimeter', 'area_ratio']))
         self._boundary_width = int(get_output_cfg(cfg, 'boundary').get('boundary_width_px', 3))
-        self._boundary_loss_weight = float(
-            get_output_cfg(cfg, "boundary").get("loss_weight", 0.0)
-        )
-        self._boundary_train_enabled = (
-            self._boundary_enabled and self._boundary_loss_weight > 0.0
-        )
+
 
         # ─ OD/PPA research evaluation ───────────────────────────────────────
         # Evaluation only: does not affect training / validation / loss.
@@ -174,10 +171,53 @@ class SegModule(pl.LightningModule):
             else {}
         )
 
+        # Measurement availability is independent of auxiliary-loss training.
+        # Reuse the loss-owned geometry when present; otherwise register one
+        # evaluation-only readout so Lightning moves its buffers with the model.
+        self._quant_eval_readout = None
+        self._quant_protocol = None
+        self._quant_unavailable_reason = "not_requested"
+        if self.quantification is not None:
+            self._quant_protocol = quantification_protocol(self.quantification)
+            self._quant_unavailable_reason = ""
+        elif self._odppa_eval_enabled:
+            polar = cfg.get("polar", {}) or {}
+            geometry = polar.get("geometry", {}) or {}
+            if self.num_classes != 3 or cfg.dataset.mask_mode != "index":
+                self._quant_unavailable_reason = "requires_three_class_index_masks"
+            elif not bool(polar.get("enabled", False)):
+                self._quant_unavailable_reason = "requires_polar_coordinates"
+            elif geometry.get("mode", "linear") != "linear":
+                self._quant_unavailable_reason = "requires_linear_radial_grid"
+            else:
+                self._quant_eval_readout = build_polar_readout(cfg)
+                self._quant_protocol = quantification_protocol(self._quant_eval_readout)
+                self._quant_unavailable_reason = ""
+                self.quant_test_metrics = torch.nn.ModuleDict({
+                    name: MeanMetric() for name in QUANT_VAL_KEYS
+                })
+
     # ── Forward ───────────────────────────────────────────────────────────────
 
     def forward(self, x):
         return self.model(x)
+
+    def _quantification_readout(self):
+        """Return the shared measurement capability independently of loss enablement."""
+        if self.quantification is not None:
+            return self.quantification
+        return self._quant_eval_readout
+
+    def _evaluation_outputs(self, images):
+        """Select the same explicit segmentation/quantification paths in val and test."""
+        if self.quantification is not None and bool(self.quant_cfg.get("adapter_enabled", False)):
+            outputs = normalize_model_output(self.model(images, return_features=True))
+            quant_logits = self.quant_head(
+                outputs["features"]["decoder_final"], outputs["seg_logits"],
+            )
+            return outputs, quant_logits, "quant_logits"
+        outputs = normalize_model_output(self(images))
+        return outputs, outputs["seg_logits"], "seg_logits"
 
     # ── Loss helper ───────────────────────────────────────────────────────────
 
@@ -193,10 +233,10 @@ class SegModule(pl.LightningModule):
 
     # ── Prediction helper ─────────────────────────────────────────────────────
 
-    def _predict(self, logits):
+    def _predict(self, logits, threshold=0.5):
         """Returns hard predictions: B × H × W (long)."""
         if self._is_binary:
-            return (torch.sigmoid(logits).squeeze(1) > 0.5).long()
+            return (torch.sigmoid(logits).squeeze(1) > threshold).long()
         return logits.argmax(dim=1)
 
     # ── Steps ─────────────────────────────────────────────────────────────────
@@ -205,9 +245,9 @@ class SegModule(pl.LightningModule):
         images, masks, _meta = unpack_batch(batch)
         loss = None
 
-        if self.quantification is not None and not self.quant_cfg.adapter_enabled:
+        if self.quantification is not None and not bool(self.quant_cfg.get("adapter_enabled", False)):
             outputs = normalize_model_output(
-                images,
+                self(images),
             )
 
             logits = outputs["seg_logits"]
@@ -245,7 +285,7 @@ class SegModule(pl.LightningModule):
                     batch_size=images.shape[0],
                 )
 
-        elif self.quantification is not None and self.quant_cfg.adapter_enabled:
+        elif self.quantification is not None and bool(self.quant_cfg.get("adapter_enabled", False)):
             outputs = normalize_model_output(
                 self.model(
                     images,
@@ -338,51 +378,13 @@ class SegModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         images, masks, _meta = unpack_batch(batch)
-
-        if self.quantification is not None and self.quant_cfg.adapter_enabled:
-            outputs = normalize_model_output(
-                self.model(
-                    images,
-                    return_features = True,
-                )
-            )
-
-            logits = outputs["seg_logits"]
-
-            quant_logits = self.quant_head(
-                outputs["features"]["decoder_final"],
-                outputs["seg_logits"],
-            )
-
-            loss, _, _ = self._loss(logits, masks)
-            preds = self._predict(logits)
-
-            self.val_dice.update(preds, masks)
-            self.val_iou.update(preds, masks)
-
-            self._update_quant_metrics(
-                'val',
-                quant_logits,
-                masks,
-            )            
-
-        else:
-            outputs = normalize_model_output(
-                self(images)
-            )
-            logits = outputs['seg_logits']
-
-            loss, _, _ = self._loss(logits, masks)
-            preds = self._predict(logits)
-
-            self.val_dice.update(preds, masks)
-            self.val_iou.update(preds, masks)
-
-            self._update_quant_metrics(
-                'val',
-                logits,
-                masks,
-            )
+        outputs, quant_logits, _source = self._evaluation_outputs(images)
+        logits = outputs["seg_logits"]
+        loss, _, _ = self._loss(logits, masks)
+        preds = self._predict(logits)
+        self.val_dice.update(preds, masks)
+        self.val_iou.update(preds, masks)
+        self._update_quant_metrics("val", quant_logits, masks)
 
         # Preserve the original meaning:
         # val/loss remains segmentation loss.
@@ -407,21 +409,50 @@ class SegModule(pl.LightningModule):
 
     def on_test_epoch_start(self):
         self.test_records = []
+        self._prediction_writer = None
+
+        # Each DDP rank saves its own samples. CSV export and rank-zero report
+        # generation happen separately after all records have been gathered.
+        from hydra.utils import to_absolute_path
+        from src.evaluation.prediction_masks import PredictionMaskWriter, normalize_save_mode
+
+        eval_cfg = self.cfg.get('eval', {}) or {}
+        mode = normalize_save_mode(eval_cfg.get('save_predictions', 'none'))
+        if mode != 'none':
+            default_dir = os.path.join(
+                self.cfg.logging.save_dir, self.cfg.logging.name, 'eval', self.eval_split,
+            )
+            output_dir = to_absolute_path(str(eval_cfg.get('output_dir') or default_dir))
+            self._prediction_writer = PredictionMaskWriter(self.cfg, output_dir, mode=mode)
 
         for metric in self.quant_test_metrics.values():
             metric.reset()
 
     def test_step(self, batch, batch_idx):
         images, masks, meta = unpack_batch(batch)
-
-        outputs = normalize_model_output(
-            self(images)
-        )
+        outputs, quant_logits, prediction_source = self._evaluation_outputs(images)
         logits = outputs['seg_logits']
-        preds = self._predict(logits)
+        threshold = float((self.cfg.get('eval', {}) or {}).get('threshold', 0.5))
+        preds = self._predict(logits, threshold=threshold)
 
         self.test_dice.update(preds, masks)
         self.test_iou.update(preds, masks)
+
+        quant_records = None
+        quant_stats = None
+        readout = self._quantification_readout()
+        if readout is not None:
+            diagnostics = compute_quantification_diagnostics(readout, quant_logits, masks)
+            quant_records = build_quantification_case_records(
+                diagnostics, protocol=self._quant_protocol,
+                prediction_source=prediction_source,
+            )
+            quant_stats = diagnostics["metrics"]
+        elif self._odppa_eval_enabled:
+            quant_records = [
+                unavailable_quantification_record(self._quant_unavailable_reason)
+                for _ in range(masks.shape[0])
+            ]
 
         self._collect_records(
             logits,
@@ -429,12 +460,24 @@ class SegModule(pl.LightningModule):
             masks,
             meta,
             batch_idx,
+            quant_records=quant_records,
         )
+
+        if quant_stats is not None:
+            # Collection applies case metadata (including incomplete PPA
+            # annotations). Test logs and exported records use the same cohort.
+            quant_stats = {
+                name: (values, valid & valid.new_tensor([
+                    row[f"quant_{name}_valid"] for row in quant_records
+                ]))
+                for name, (values, valid) in quant_stats.items()
+            }
 
         self._update_quant_metrics(
             'test',
-            logits,
+            quant_logits,
             masks,
+            stats=quant_stats,
         )
 
     def on_test_epoch_end(self):
@@ -499,17 +542,26 @@ class SegModule(pl.LightningModule):
         """Fetch meta[key][idx] from a (possibly collated) batch metadata dict."""
         if isinstance(meta, dict) and key in meta:
             value = meta[key]
-            try:
-                return value[idx]
-            except (TypeError, IndexError, KeyError):
+            if isinstance(value, (str, bytes)):
                 return value
+            try:
+                value = value[idx]
+            except (TypeError, IndexError, KeyError):
+                pass
+            # default_collate turns numeric/bool metadata into scalar tensors.
+            # Normalize before both native-mask and quantification policies.
+            if hasattr(value, "item") and getattr(value, "ndim", 1) == 0:
+                value = value.item()
+            return value
         return default
 
-    def _collect_records(self, logits, preds, masks, meta, batch_idx):
+    def _collect_records(self, logits, preds, masks, meta, batch_idx, quant_records=None):
         from src.metrics.functional import case_class_metrics, predict_from_logits
 
-        # Use the configured threshold for the per-case binary prediction (the
-        # torchmetrics aggregate above keeps its own 0.5 default).
+        if quant_records is not None and len(quant_records) != masks.shape[0]:
+            raise ValueError("Segmentation and quantification batches must have the same case count.")
+
+        # Keep CSVs, saved masks, and aggregate test metrics on one threshold.
         if self._is_binary:
             threshold = float(self.cfg.get('eval', {}).get('threshold', 0.5))
             rec_preds = predict_from_logits(logits, is_binary=True, threshold=threshold)
@@ -540,7 +592,7 @@ class SegModule(pl.LightningModule):
                     meta,
                     'case_id',
                     b,
-                    f'case_{batch_idx}_{b}',
+                    f'case_rank{self.global_rank}_{batch_idx}_{b}',
                 )
             )
 
@@ -567,8 +619,17 @@ class SegModule(pl.LightningModule):
                 'image_path': image_path,
                 'mask_path': mask_path,
                 'pred_path': '',
+                'pred_polar_path': '',
+                'pred_cartesian_path': '',
                 'per_class': per_class,
             }
+
+            case_metadata = dict(self._odppa_metadata.get(case_id, {}))
+            for field in ("patient_id", "eye", "reference_complete"):
+                if case_metadata.get(field) in (None, ""):
+                    value = self._meta_get(meta, field, b, None)
+                    if value not in (None, ""):
+                        case_metadata[field] = value
 
             # ── OD/PPA research evaluation ─────────────────────────────────
             if self._odppa_eval_enabled:
@@ -589,20 +650,43 @@ class SegModule(pl.LightningModule):
 
                     cfg=self.cfg,
 
-                    metadata=self._odppa_metadata.get(
-                        case_id,
-                        {},
-                    ),
+                    metadata=case_metadata,
                 )
 
                 record.update(
                     odppa_record
                 )
 
+            # Preserve lexical IDs (including leading zeros) and use the same
+            # patient grouping for segmentation and quantification statistics.
+            patient_id = case_metadata.get("patient_id")
+            record["patient_id"] = str(case_id if patient_id in (None, "") else patient_id)
+            if quant_records is not None:
+                complete = case_metadata.get(
+                    "reference_complete",
+                    self._meta_get(meta, "reference_complete", b,
+                                   record.get("reference_complete", True)),
+                )
+                quant_records[b] = apply_annotation_completeness(quant_records[b], complete)
+                record.update(quant_records[b])
+
             if self._clinical_enabled:
                 record['clinical'] = self._case_clinical(pred_b, fg_classes)
             if self._boundary_enabled:
                 record['boundary'] = self._case_boundary(pred_b, mask_b, fg_classes)
+
+            writer = self._prediction_writer
+            if writer is not None:
+                original_size = None
+                if writer.mode in {'cartesian', 'both'} and writer.cartesian_size == 'original':
+                    original_size = original_size_from_metadata(meta, b)
+                    if original_size is None and image_path:
+                        from PIL import Image
+                        with Image.open(image_path) as image:
+                            original_size = image.height, image.width
+                record.update(writer.save(
+                    pred_b.detach().numpy(), case_id, original_size=original_size,
+                ))
             self.test_records.append(record)
 
     def _case_clinical(self, pred_b, fg_classes):
@@ -660,7 +744,7 @@ class SegModule(pl.LightningModule):
             {"params": self.model.parameters()}
         ]
 
-        if self.quant_cfg != {} and self.quant_cfg.adapter_enabled:
+        if self.quantification is not None and bool(self.quant_cfg.get("adapter_enabled", False)):
             adapter_cfg = (
                 self.cfg.quantification.get("adapter") or {}
             )
@@ -728,111 +812,29 @@ class SegModule(pl.LightningModule):
             }
 
         raise ValueError(f"Unknown scheduler '{sch_name}'. Choose: cosine, step, plateau, none")
-    
-    def _make_boundary_target(self, masks, width_px: int = 3):
-        """
-        masks: B×H×W, long class-index mask.
-        returns: B×1×H×W float boundary target.
-
-        class-agnostic boundary:
-        - marks pixels around any class transition
-        - also marks foreground touching image border
-        """
-        m = masks
-        b = torch.zeros_like(m, dtype=torch.bool)
-
-        # vertical class transitions
-        diff_h = m[:, 1:, :] != m[:, :-1, :]
-        b[:, 1:, :] |= diff_h
-        b[:, :-1, :] |= diff_h
-
-        # horizontal class transitions
-        diff_w = m[:, :, 1:] != m[:, :, :-1]
-        b[:, :, 1:] |= diff_w
-        b[:, :, :-1] |= diff_w
-
-        # foreground touching image border should count as boundary
-        # assumes background id = 0, consistent with usual multiclass masks
-        fg = m > 0
-        b[:, 0, :] |= fg[:, 0, :]
-        b[:, -1, :] |= fg[:, -1, :]
-        b[:, :, 0] |= fg[:, :, 0]
-        b[:, :, -1] |= fg[:, :, -1]
-
-        b = b.float().unsqueeze(1)
-
-        # thicken the boundary band; width_px=3 is a good first value for 512×512
-        width_px = max(int(width_px), 1)
-        if width_px > 1:
-            k = 2 * width_px - 1
-            b = F.max_pool2d(
-                b,
-                kernel_size=k,
-                stride=1,
-                padding=width_px - 1,
-            )
-            b = (b > 0).float()
-
-        return b
-
-
-    def _boundary_loss(self, boundary_logits, masks):
-        target = self._make_boundary_target(
-            masks,
-            width_px=self._boundary_width,
-        ).to(device=boundary_logits.device, dtype=boundary_logits.dtype)
-
-        if target.shape[-2:] != boundary_logits.shape[-2:]:
-            target = F.interpolate(
-                target,
-                size=boundary_logits.shape[-2:],
-                mode="nearest",
-            )
-
-        # Boundary pixels are sparse, so BCE needs positive reweighting.
-        pos = target.sum()
-        neg = target.numel() - pos
-        pos_weight = (neg / (pos + 1.0)).clamp(1.0, 20.0).detach()
-
-        bce = F.binary_cross_entropy_with_logits(
-            boundary_logits,
-            target,
-            pos_weight=pos_weight.view(1),
-        )
-
-        probs = torch.sigmoid(boundary_logits)
-        dims = (1, 2, 3)
-        inter = (probs * target).sum(dim=dims)
-        denom = probs.sum(dim=dims) + target.sum(dim=dims)
-        dice = 1.0 - ((2.0 * inter + 1.0) / (denom + 1.0)).mean()
-
-        return 0.5 * bce + 0.5 * dice, bce, dice
 
     @torch.no_grad()
-    def _update_quant_metrics(self, stage, logits, masks):
-        if self.quantification is None:
-            return
-
+    def _update_quant_metrics(self, stage, logits, masks, stats=None):
         metrics = getattr(
             self,
             f'quant_{stage}_metrics',
         )
-
-        stats = self.quantification.diagnostics(
-            logits,
-            masks,
-        )
+        if not metrics:
+            return
+        if stats is None:
+            readout = self._quantification_readout()
+            if readout is None:
+                return
+            stats = compute_quantification_diagnostics(readout, logits, masks)["metrics"]
 
         for name, (values, valid) in stats.items():
+            valid = valid & torch.isfinite(values)
             metrics[name].update(
-                values,
+                torch.where(valid, values, torch.zeros_like(values)),
                 weight=valid.float(),
             )
 
     def _log_quant_metrics(self, stage, prefix):
-        if self.quantification is None:
-            return
-
         metrics = getattr(
             self,
             f'quant_{stage}_metrics',

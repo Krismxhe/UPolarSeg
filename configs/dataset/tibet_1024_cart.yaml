@@ -8,7 +8,7 @@
 # mask_mode:
 #   index  → pixel values are class indices 0, 1, 2, …  ← use for multi-class
 name: tibet_1024_cart
-root: /data2/ziyue_data/tibet_crop_1024_hmx
+root: /data2/ziyue_data/dataset_v2/tibet_cropped_1024_v2
 mask_dir: masks_semantic
 mask_mode: index
 num_classes: 3

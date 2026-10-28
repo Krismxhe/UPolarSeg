@@ -12,13 +12,15 @@ import os
 
 import hydra
 from hydra.utils import to_absolute_path
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
 from src.datasets.seg_dataset import SegDataModule
+from src.evaluation.prediction_masks import normalize_save_mode
 from src.metrics.evaluator import SegEvaluator
 from src.models.seg_module import SegModule
+from src.utils.io import ensure_dir, write_resolved_config
 
 
 @hydra.main(version_base=None, config_path='configs', config_name='train')
@@ -31,6 +33,13 @@ def main(cfg: DictConfig) -> None:
         )
 
     split = cfg.split
+    eval_cfg = cfg.get('eval', {}) or {}
+    save_mode = normalize_save_mode(eval_cfg.get('save_predictions', 'none'))
+    # Resolve before testing, independently of CSV export, so every rank's mask
+    # writer and the final reports use the same destination.
+    default_dir = os.path.join(cfg.logging.save_dir, cfg.logging.name, 'eval', split)
+    output_dir = to_absolute_path(str(eval_cfg.get('output_dir', None) or default_dir))
+    OmegaConf.update(cfg, 'eval.output_dir', output_dir, force_add=True)
     datamodule = SegDataModule(cfg, eval_split=split)
 
     odppa_cfg = (
@@ -81,28 +90,33 @@ def main(cfg: DictConfig) -> None:
     )
     results = trainer.test(model, datamodule=datamodule)
 
+    if not trainer.is_global_zero:
+        return
+
     print(f'\n── Results ({split}) ──────────────────────')
     for k, v in results[0].items():
         print(f'  {k:<30} {v:.4f}')
 
     # ── Explicit research CSV (summary / per_class / per_case) ─────────────────
-    eval_cfg = cfg.get('eval', {}) or {}
-    if eval_cfg.get('save_csv', True) and trainer.is_global_zero:
-        if trainer.world_size > 1:
-            print('[WARN] CSV export is single-process for now; with DDP only the '
-                  'rank-0 shard is recorded (TODO: rank-safe per-case merge).')
-
-        # Resolve output dir to an absolute path (Hydra may not chdir, so a
-        # relative path would be ambiguous).
-        default_dir = os.path.join(cfg.logging.save_dir, cfg.logging.name, 'eval', split)
-        output_dir = to_absolute_path(eval_cfg.get('output_dir', None) or default_dir)
-
+    if eval_cfg.get('save_csv', True):
         evaluator = SegEvaluator(cfg, split=split, run_name=cfg.logging.name,
                                  checkpoint=str(ckpt_path))
         written = evaluator.write(model.test_records, output_dir)
         print(f'\n[INFO] Evaluation CSV written to: {output_dir}')
         for name, path in written.items():
             print(f'  {name:<10} {path}')
+    elif save_mode != 'none':
+        # A mask-only export still needs the geometry and threshold used to
+        # produce its class-index PNGs.
+        config_path = write_resolved_config(ensure_dir(output_dir) / 'config.yaml', cfg)
+        print(f'\n[INFO] Evaluation config written to: {config_path}')
+
+    if save_mode != 'none':
+        print('\n[INFO] Prediction masks written from seg_logits:')
+        if save_mode in {'polar', 'both'}:
+            print(f"  polar      {os.path.join(output_dir, 'masks_polar')}")
+        if save_mode in {'cartesian', 'both'}:
+            print(f"  cartesian  {os.path.join(output_dir, 'masks_cartesian')}")
 
 
 if __name__ == '__main__':

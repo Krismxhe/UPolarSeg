@@ -48,6 +48,16 @@ class SegDataset(Dataset):
 
         if len(self.images) == 0:
             raise FileNotFoundError(f"No images found in {self.img_dir}")
+        # case_id is also the output PNG stem and the distributed record key.
+        # Distinct images such as a.jpg and a.png must never overwrite each other.
+        seen = {}
+        for path in self.images:
+            if path.stem in seen:
+                raise ValueError(
+                    f"Duplicate case_id {path.stem!r}: {seen[path.stem].name} and "
+                    f"{path.name} in {self.img_dir}. Image stems must be unique."
+                )
+            seen[path.stem] = path
 
     def __len__(self):
         return len(self.images)
@@ -102,7 +112,6 @@ class SegDataModule(pl.LightningDataModule):
 
         ds = self.cfg.dataset
 
-        train_tf = build_transforms(self.cfg, split='train')
         eval_tf  = build_transforms(self.cfg, split='val')
 
         kwargs = dict(
@@ -110,9 +119,17 @@ class SegDataModule(pl.LightningDataModule):
             mask_dir=ds.mask_dir,
             mask_mode=ds.mask_mode,
         )
-        self.train_ds = SegDataset(split='train', transforms=train_tf, **kwargs)
-        self.val_ds   = SegDataset(split='val',   transforms=eval_tf,  **kwargs)
-        self.test_ds  = SegDataset(split='test',  transforms=eval_tf,  **kwargs)
+        if stage in (None, 'fit'):
+            train_tf = build_transforms(self.cfg, split='train')
+            self.train_ds = SegDataset(split='train', transforms=train_tf, **kwargs)
+        if stage in (None, 'fit', 'validate'):
+            self.val_ds = SegDataset(split='val', transforms=eval_tf, **kwargs)
+        if stage in (None, 'test', 'predict'):
+            if self.eval_split not in {'train', 'val', 'test'}:
+                raise ValueError(f"eval_split must be train, val, or test, got {self.eval_split!r}")
+            # Even evaluation on the training split must omit random crops/flips:
+            # exported Cartesian masks are aligned to the original image.
+            self.eval_ds = SegDataset(split=self.eval_split, transforms=eval_tf, **kwargs)
 
     def _loader(self, dataset, shuffle):
         return DataLoader(
@@ -132,7 +149,7 @@ class SegDataModule(pl.LightningDataModule):
         return self._loader(self.val_ds, shuffle=False)
 
     def test_dataloader(self):
-        ds_map = {'train': self.train_ds, 'val': self.val_ds, 'test': self.test_ds}
-        if self.eval_split not in ds_map:
-            raise ValueError(f"eval_split must be one of {list(ds_map)}, got '{self.eval_split}'")
-        return self._loader(ds_map[self.eval_split], shuffle=False)
+        return self._loader(self.eval_ds, shuffle=False)
+
+    def predict_dataloader(self):
+        return self._loader(self.eval_ds, shuffle=False)

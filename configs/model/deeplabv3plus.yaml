@@ -1,5 +1,5 @@
 # DeepLabV3+ — ASPP module + decoder, strong on large-scale context
 arch: DeepLabV3Plus
-encoder: resnet50
+encoder: resnet34
 encoder_weights: imagenet
 in_channels: 3

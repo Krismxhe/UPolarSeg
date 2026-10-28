@@ -16,6 +16,7 @@ then select it via ``model.skip.name=<name>``.
 """
 
 from __future__ import annotations
+from typing import Optional
 
 import math
 from collections.abc import Iterable
@@ -448,7 +449,7 @@ def _pad_theta(x: torch.Tensor, pad: int, mode: str = "circular") -> torch.Tenso
         return _circular_pad_theta(x, pad)
     if mode in {"zero", "zeros", "constant"}:
         return F.pad(x, (0, 0, pad, pad), mode="constant", value=0.0)
-    if mode in {"replicate", reflect}:
+    if mode in {"replicate", "reflect"}:
         if mode == "reflect" and pad>=x.shape[-2]:
             mode = "replicate"
         return F.pad(x, (0, 0, pad, pad), mode=mode)
@@ -469,25 +470,50 @@ def _pad_radius(x: torch.Tensor, pad: int, mode: str = "replicate") -> torch.Ten
         raise ValueError("radial_padding='circular' is invalid: radius is not periodic.")
     raise ValueError(f"Unknown radial padding mode={mode!r}")
 
-def _axis_groups(hidden_channels: int, axis_conv_type: str, axis_groups: int) -> int:
+def _axis_groups(
+    hidden_channels: int,
+    axis_conv_type: str,
+    axis_groups: int,
+) -> int:
     """Resolve group count for radial/angular axis convolutions"""
-    axis_conv_type = str(axis_conv_type).lower()
     hidden_channels = int(hidden_channels)
+    axis_conv_type = str(axis_conv_type).strip().lower()
+
+    if hidden_channels <= 0:
+        raise ValueError(
+            f"hidden_channels must be positive, got {hidden_channels}."
+        )
+
+    # Depthwise convolution
     if axis_conv_type in {"depthwise", "dw"}:
         return hidden_channels
+
+    # Grouped convolution
+    if axis_conv_type in {"group", "grouped"}:
+        axis_groups = int(axis_groups)
+
+        if axis_groups <= 0:
+            raise ValueError(
+                f"axis_groups must be positive, got {axis_groups}."
+            )
+
+        return math.gcd(hidden_channels, axis_groups)
+
+    # Full / dense convolution
     if axis_conv_type in {"full", "dense", "standard"}:
-        axis_groups = max(int(axis_groups), 1)
-        return max(math.gcd(hidden_channels, axis_groups), 1)
+        return 1
+
     raise ValueError(
-        f"Unknown axis_conv_type={axis_conv_type!r}; use 'depthwise', 'group', or 'full'."
+        f"Unknown axis_conv_type={axis_conv_type!r}; "
+        "use 'depthwise', 'group', or 'full'."
     )
-    
+
 def _compute_extra_channels(
     in_channels: int,
     extra_channels: Optional[int],
     extra_ratio: float,
     min_extra_channels: int,
-    max_extra_channels: Optionalp[int],
+    max_extra_channels: Optional[int],
 ) -> int:
     """Compute per-axis extra channel width"""
     if extra_channels is not None and int(extra_channels) > 0:

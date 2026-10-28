@@ -1,5 +1,5 @@
 name: zhengzhou_1024_polar
-root: /data2/ziyue_data/zhengzhou_external_hmx
+root: /data2/ziyue_data/dataset_v2/zhengzhou_cropped_1024_v2
 mask_dir: masks_semantic
 mask_mode: index
 num_classes: 3

@@ -89,6 +89,10 @@ def main(cfg: DictConfig) -> None:
         log_every_n_steps=1,
         check_val_every_n_epoch=cfg.train.val_interval,
         precision=cfg.train.precision,
+
+        # Reproducibility
+        deterministic=True,
+        benchmark=False,
     )
 
     trainer.fit(model, datamodule=datamodule)

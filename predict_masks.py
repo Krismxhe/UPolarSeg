@@ -1,144 +1,123 @@
-"""
-Generate prediction masks for a checkpoint on one dataset split.
+"""Export class-index predictions from a checkpoint on one dataset split.
 
-For a polar model: save polar mask + inverse-transformed cart mask.
-For a cart model:  save cart mask  + forward-transformed polar mask.
-
-Output structure:
+--save_masks selects none, polar, cartesian, or both (default: both).
+The existing CLI directory layout is retained:
     {output_root}/{model_name}/masks_polar/{dataset_short}/{case_id}.png
     {output_root}/{model_name}/masks_cart/{dataset_short}/{case_id}.png
 
-Usage:
-    python predict_masks.py \
-        --ckpt /path/to/best.ckpt \
-        --model_config baseline/transunet \
-        --dataset beijing_1024_cart \
-        --dataset_short beijing \
-        --split test \
-        --model_name TransUNet_cart \
-        --output_root /home/ziyue/ziyue/mengxian/pred_mask \
-        --img_size 512 \
-        --max_radius 362
+Cartesian output defaults to each original image's size. Pass
+--cartesian_size input to retain the previous input-grid output dimensions.
+Geometry comes from the resolved configuration, with optional Hydra overrides.
 """
 
 import argparse
 from pathlib import Path
 
-import numpy as np
 import torch
 import hydra
-from PIL import Image
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from src.datasets.seg_dataset import SegDataModule
+from src.datasets.batch import original_size_from_metadata, unpack_batch
+from src.evaluation.prediction_masks import PredictionMaskWriter
+from src.metrics.functional import predict_from_logits
 from src.models.seg_module import SegModule
-from src.datasets.batch import unpack_batch
 from src.models.outputs import normalize_model_output
-from src.transforms.polar_transforms import cart_to_polar_mask, polar_mask_to_cart
 
 
-def build_cfg(dataset, model_config, split, img_size, is_polar):
+def build_cfg(dataset, model_config, split, img_size, is_polar, extra_overrides=None):
     overrides = [
         f'dataset={dataset}',
         f'model={model_config}',
         f'split={split}',
         f'train.img_size={img_size}',
         'hardware.devices=[0]',
+        f'polar={"enabled" if is_polar else "disabled"}',
     ]
-    if is_polar:
-        overrides.append('polar=enabled')
+    overrides.extend(extra_overrides or [])
     with hydra.initialize(version_base=None, config_path='configs'):
-        cfg = hydra.compose(config_name='train', overrides=overrides)
-    return cfg
+        return hydra.compose(config_name='train', overrides=overrides)
 
 
-def resolve_max_radius(cfg, is_polar, fallback):
-    """Read max_radius from cfg if available and not None; else use fallback."""
-    if not is_polar:
-        return float(fallback)
-    try:
-        mr = cfg.polar.geometry.get('max_radius', None)
-    except Exception:
-        mr = None
-    if mr is None:
-        return float(fallback)
-    return float(mr)
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--ckpt', required=True)
+    parser.add_argument('--model_config', required=True,
+                        help='Model config used for training, e.g. unet or baseline/transunet')
+    parser.add_argument('--dataset', required=True,
+                        help='Dataset config, e.g. beijing_1024_cart or beijing_1024_polar')
+    parser.add_argument('--dataset_short', required=True,
+                        help='Dataset subdirectory name, e.g. beijing')
+    parser.add_argument('--split', choices=['train', 'val', 'test'], default='test')
+    parser.add_argument('--model_name', required=True)
+    parser.add_argument('--output_root', required=True)
+    parser.add_argument('--img_size', type=int, default=512)
+    parser.add_argument('--save_masks', '--save_predictions', dest='save_masks',
+                        choices=['none', 'polar', 'cartesian', 'both'], default='both')
+    parser.add_argument('--cartesian_size', choices=['original', 'input'], default='original')
+    parser.add_argument('--input_space', choices=['auto', 'polar', 'cartesian'], default='auto',
+                        help='auto retains the legacy inference from the dataset config name')
+    parser.add_argument('--max_radius', type=float, default=None,
+                        help='Optional override applied to both input transforms and export geometry')
+    parser.add_argument('--override', action='append', default=[], metavar='KEY=VALUE',
+                        help='Repeat for training-config overrides, e.g. polar.geometry.mode=log')
+    return parser
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--ckpt', required=True)
-    parser.add_argument('--model_config', required=True,
-                        help='e.g. unet / deeplabv3plus_resnet34 / segformer / baseline/transunet / research/modular_unet_pmsr_lite')
-    parser.add_argument('--dataset', required=True,
-                        help='e.g. beijing_1024_cart / beijing_1024_polar')
-    parser.add_argument('--dataset_short', required=True,
-                        help='e.g. beijing / tibet / zhengzhou')
-    parser.add_argument('--split', default='test')
-    parser.add_argument('--model_name', required=True,
-                        help='e.g. DeepLabv3+_resnet34_cart')
-    parser.add_argument('--output_root', required=True)
-    parser.add_argument('--img_size', type=int, default=512)
-    parser.add_argument('--max_radius', type=float, default=362)
-    args = parser.parse_args()
+    args = build_parser().parse_args()
+    if args.save_masks == 'none':
+        print('[INFO] Mask export disabled; no model or dataset loaded and no masks written.')
+        return
 
-    is_polar = 'polar' in args.dataset
+    is_polar = ('polar' in args.dataset.lower()) if args.input_space == 'auto' else args.input_space == 'polar'
+    cfg = build_cfg(
+        args.dataset, args.model_config, args.split, args.img_size, is_polar, args.override,
+    )
+    if args.max_radius is not None:
+        OmegaConf.update(cfg, 'polar.geometry.max_radius', args.max_radius, force_add=True)
+    OmegaConf.update(cfg, 'eval.save_predictions', args.save_masks)
+    OmegaConf.update(cfg, 'eval.prediction_cartesian_size', args.cartesian_size)
 
-    out_dir = Path(args.output_root) / args.model_name
-    out_polar = out_dir / 'masks_polar' / args.dataset_short
-    out_cart = out_dir / 'masks_cart' / args.dataset_short
-    out_polar.mkdir(parents=True, exist_ok=True)
-    out_cart.mkdir(parents=True, exist_ok=True)
-
+    out_dir = (Path(args.output_root) / args.model_name).resolve()
+    writer = PredictionMaskWriter(
+        cfg, out_dir,
+        polar_dir=out_dir / 'masks_polar' / args.dataset_short,
+        cartesian_dir=out_dir / 'masks_cart' / args.dataset_short,
+    )
     print(f'\n=== {args.model_name} / {args.dataset_short} ({args.dataset}) ===')
-    print(f'is_polar = {is_polar}')
+    print(f'input_is_polar = {writer.input_is_polar}; save_masks = {writer.mode}')
 
-    cfg = build_cfg(args.dataset, args.model_config, args.split, args.img_size, is_polar)
-    datamodule = SegDataModule(cfg, eval_split=args.split)
+    datamodule = SegDataModule(cfg, eval_split=str(cfg.split))
     datamodule.setup(stage='test')
     loader = datamodule.test_dataloader()
 
     model = SegModule.load_from_checkpoint(args.ckpt, strict=False, cfg=cfg)
-    model.eval()
-    if torch.cuda.is_available():
-        model = model.cuda()
-
-    center = ((args.img_size - 1) / 2, (args.img_size - 1) / 2)
-    max_radius = resolve_max_radius(cfg, is_polar, args.max_radius)
-    print(f'max_radius = {max_radius}')
-
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device).eval()
+    threshold = float(cfg.eval.get('threshold', 0.5))
     n_saved = 0
-    for batch in tqdm(loader, desc=f'{args.model_name}/{args.dataset_short}'):
-        images, masks, meta = unpack_batch(batch)
-        if torch.cuda.is_available():
-            images = images.cuda()
-        with torch.no_grad():
-            outputs = normalize_model_output(model(images))
-            logits = outputs['seg_logits']
-            preds = logits.argmax(dim=1).cpu().numpy().astype(np.uint8)
+    with torch.inference_mode():
+        for batch in tqdm(loader, desc=f'{args.model_name}/{args.dataset_short}'):
+            images, _masks, meta = unpack_batch(batch)
+            outputs = normalize_model_output(model(images.to(device)))
+            predictions = predict_from_logits(
+                outputs['seg_logits'], is_binary=(int(cfg.dataset.num_classes) == 1),
+                threshold=threshold,
+            ).cpu().numpy()
+            for index, prediction in enumerate(predictions):
+                original_size = None
+                if writer.mode in {'cartesian', 'both'} and writer.cartesian_size == 'original':
+                    original_size = original_size_from_metadata(meta, index)
+                writer.save(prediction, meta['case_id'][index], original_size=original_size)
+                n_saved += 1
 
-        for i in range(preds.shape[0]):
-            case_id = meta['case_id'][i]
-            pred = preds[i]
-
-            if is_polar:
-                Image.fromarray(pred).save(out_polar / f'{case_id}.png')
-                cart = polar_mask_to_cart(
-                    pred, out_h=args.img_size, out_w=args.img_size,
-                    center=center, max_radius=max_radius, mode='linear',
-                ).astype(np.uint8)
-                Image.fromarray(cart).save(out_cart / f'{case_id}.png')
-            else:
-                Image.fromarray(pred).save(out_cart / f'{case_id}.png')
-                polar = cart_to_polar_mask(
-                    pred, center=center, max_radius=max_radius,
-                    radius_bins=args.img_size, angle_bins=args.img_size,
-                ).astype(np.uint8)
-                Image.fromarray(polar).save(out_polar / f'{case_id}.png')
-
-            n_saved += 1
-
-    print(f'[INFO] Saved {n_saved} masks to {out_dir}')
+    print(f'[INFO] Saved predictions for {n_saved} cases.')
+    if writer.mode in {'polar', 'both'}:
+        print(f'  polar     -> {writer.polar_dir}')
+    if writer.mode in {'cartesian', 'both'}:
+        print(f'  cartesian -> {writer.cartesian_dir}')
 
 
 if __name__ == '__main__':
