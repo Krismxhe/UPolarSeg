@@ -18,7 +18,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
 from src.datasets.seg_dataset import SegDataModule
 from src.evaluation.prediction_masks import normalize_save_mode
-from src.evaluation.quantification_overlays import normalize_overlay_mode
+from src.evaluation.quantification_overlays import normalize_fundus_mode, normalize_overlay_mode
 from src.metrics.evaluator import SegEvaluator
 from src.models.seg_module import SegModule
 from src.utils.io import ensure_dir, write_resolved_config
@@ -38,6 +38,7 @@ def main(cfg: DictConfig) -> None:
     save_mode = normalize_save_mode(eval_cfg.get('save_predictions', 'none'))
     overlay_mode = normalize_overlay_mode(eval_cfg.get('save_quantification_overlays', 'none'))
     gt_overlay_mode = normalize_overlay_mode(eval_cfg.get('save_quantification_gt_overlays', 'none'))
+    fundus_mode = normalize_fundus_mode(eval_cfg.get('save_fundus_overlays', 'none'))
     # Resolve before testing, independently of CSV export, so every rank's
     # writers and the final reports use the same destination.
     default_dir = os.path.join(cfg.logging.save_dir, cfg.logging.name, 'eval', split)
@@ -108,7 +109,7 @@ def main(cfg: DictConfig) -> None:
         print(f'\n[INFO] Evaluation CSV written to: {output_dir}')
         for name, path in written.items():
             print(f'  {name:<10} {path}')
-    elif save_mode != 'none' or overlay_mode != 'none' or gt_overlay_mode != 'none':
+    elif any(mode != 'none' for mode in (save_mode, overlay_mode, gt_overlay_mode, fundus_mode)):
         # Image-only exports still retain their resolved geometry, prediction
         # source, readout selection and threshold alongside the output files.
         config_path = write_resolved_config(ensure_dir(output_dir) / 'config.yaml', cfg)
@@ -141,7 +142,13 @@ def main(cfg: DictConfig) -> None:
             print(f"  polar      {os.path.join(output_dir, 'overlays_gt_polar')}")
         if gt_overlay_mode in {'cartesian', 'both'}:
             print(f"  cartesian  {os.path.join(output_dir, 'overlays_gt_cartesian')}")
-    if overlay_mode != 'none' or gt_overlay_mode != 'none':
+    if fundus_mode != 'none':
+        print('\n[INFO] Hard quantification overlays on fundus images written:')
+        if fundus_mode in {'prediction', 'both'}:
+            print(f"  prediction   {os.path.join(output_dir, 'overlays_fundus')}")
+        if fundus_mode in {'groundtruth', 'both'}:
+            print(f"  ground truth {os.path.join(output_dir, 'overlays_gt_fundus')}")
+    if overlay_mode != 'none' or gt_overlay_mode != 'none' or fundus_mode != 'none':
         print(f"  metadata   {os.path.join(output_dir, 'overlay_metadata')}")
 
 

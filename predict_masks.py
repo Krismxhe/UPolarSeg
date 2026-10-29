@@ -4,6 +4,7 @@
 --save_overlays independently selects PMW/Dv/Dh visualizations (default: none).
 --overlay_layout separates hard/soft predictions or combines them in one image.
 --save_gt_overlays independently selects hard ground-truth overlays (default: none).
+--save_fundus_overlays selects hard prediction/GT measurements on the RGB image.
 The existing CLI directory layout is retained:
     {output_root}/{model_name}/masks_polar/{dataset_short}/{case_id}.png
     {output_root}/{model_name}/masks_cart/{dataset_short}/{case_id}.png
@@ -24,10 +25,13 @@ from tqdm import tqdm
 from src.datasets.seg_dataset import SegDataModule
 from src.datasets.batch import original_size_from_metadata, unpack_batch
 from src.evaluation.prediction_masks import PredictionMaskWriter
-from src.evaluation.quantification_overlays import QuantificationOverlayWriter, normalize_overlay_mode
+from src.evaluation.quantification_overlays import (
+    QuantificationOverlayWriter, normalize_fundus_mode, normalize_overlay_mode,
+)
 from src.metrics.functional import predict_from_logits
 from src.models.seg_module import SegModule
 from src.models.outputs import normalize_model_output
+from src.utils.io import ensure_dir, write_resolved_config
 
 
 def build_cfg(dataset, model_config, split, img_size, is_polar, extra_overrides=None):
@@ -70,6 +74,10 @@ def build_parser():
                         help='Readouts to draw; default follows config (both)')
     parser.add_argument('--overlay_source', choices=['seg_logits', 'quantification'], default=None,
                         help='Prediction source to measure and colour; default follows config (seg_logits)')
+    parser.add_argument('--save_fundus_overlays', choices=['none', 'prediction', 'groundtruth', 'both'], default=None,
+                        help='Hard measurements over RGB images; default follows config (none)')
+    parser.add_argument('--fundus_overlay_alpha', type=float, default=None,
+                        help='Mask-colour blend opacity in [0, 1]; default follows config (0.0)')
     parser.add_argument('--input_space', choices=['auto', 'polar', 'cartesian'], default='auto',
                         help='auto retains the legacy inference from the dataset config name')
     parser.add_argument('--max_radius', type=float, default=None,
@@ -96,13 +104,16 @@ def main():
         ('quantification_overlay_layout', args.overlay_layout),
         ('quantification_overlay_readouts', args.overlay_readouts),
         ('quantification_overlay_source', args.overlay_source),
+        ('save_fundus_overlays', args.save_fundus_overlays),
+        ('fundus_overlay_alpha', args.fundus_overlay_alpha),
     ):
         if value is not None:
             OmegaConf.update(cfg, f'eval.{key}', value, force_add=True)
     overlay_mode = normalize_overlay_mode(cfg.eval.get('save_quantification_overlays', 'none'))
     gt_overlay_mode = normalize_overlay_mode(cfg.eval.get('save_quantification_gt_overlays', 'none'))
-    if args.save_masks == 'none' and overlay_mode == 'none' and gt_overlay_mode == 'none':
-        print('[INFO] Mask, prediction-overlay and GT-overlay export disabled; no model or dataset loaded.')
+    fundus_mode = normalize_fundus_mode(cfg.eval.get('save_fundus_overlays', 'none'))
+    if all(mode == 'none' for mode in (args.save_masks, overlay_mode, gt_overlay_mode, fundus_mode)):
+        print('[INFO] All mask and overlay exports disabled; no model or dataset loaded.')
         return
 
     out_dir = (Path(args.output_root) / args.model_name).resolve()
@@ -112,7 +123,7 @@ def main():
         cartesian_dir=out_dir / 'masks_cart' / args.dataset_short,
     )
     overlay_writer = None
-    if overlay_mode != 'none' or gt_overlay_mode != 'none':
+    if overlay_mode != 'none' or gt_overlay_mode != 'none' or fundus_mode != 'none':
         overlay_writer = QuantificationOverlayWriter(
             cfg, out_dir, mode=overlay_mode,
             polar_dir=out_dir / 'overlays_polar' / args.dataset_short,
@@ -120,10 +131,13 @@ def main():
             metadata_dir=out_dir / 'overlay_metadata' / args.dataset_short,
             gt_polar_dir=out_dir / 'overlays_gt_polar' / args.dataset_short,
             gt_cartesian_dir=out_dir / 'overlays_gt_cartesian' / args.dataset_short,
+            fundus_dir=out_dir / 'overlays_fundus' / args.dataset_short,
+            gt_fundus_dir=out_dir / 'overlays_gt_fundus' / args.dataset_short,
         )
     print(f'\n=== {args.model_name} / {args.dataset_short} ({args.dataset}) ===')
     print(f'input_is_polar = {writer.input_is_polar}; save_masks = {writer.mode}; '
-          f'save_overlays = {overlay_mode}; save_gt_overlays = {gt_overlay_mode}')
+          f'save_overlays = {overlay_mode}; save_gt_overlays = {gt_overlay_mode}; '
+          f'save_fundus_overlays = {fundus_mode}')
 
     datamodule = SegDataModule(cfg, eval_split=str(cfg.split))
     datamodule.setup(stage='test')
@@ -138,7 +152,7 @@ def main():
         for batch in tqdm(loader, desc=f'{args.model_name}/{args.dataset_short}'):
             images, masks, meta = unpack_batch(batch)
             overlay_batch = None
-            if overlay_mode == 'none':
+            if overlay_mode == 'none' and fundus_mode not in {'prediction', 'both'}:
                 outputs = normalize_model_output(model(images.to(device)))
                 quant_logits, prediction_source = outputs['seg_logits'], 'seg_logits'
             else:
@@ -171,6 +185,7 @@ def main():
                     model._save_quantification_overlay(
                         overlay_writer, overlay_batch, index, case_id, original_size=original_size,
                         reference_complete=complete,
+                        image_path=model._meta_get(meta, 'image_path', index, ''),
                     )
                 n_saved += 1
 
@@ -193,7 +208,16 @@ def main():
             print(f'  GT overlay polar     -> {overlay_writer.gt_polar_dir}')
         if gt_overlay_mode in {'cartesian', 'both'}:
             print(f'  GT overlay cartesian -> {overlay_writer.gt_cartesian_dir}')
+        if fundus_mode in {'prediction', 'both'}:
+            print(f'  fundus prediction    -> {overlay_writer.fundus_dir}')
+        if fundus_mode in {'groundtruth', 'both'}:
+            print(f'  fundus ground truth  -> {overlay_writer.gt_fundus_dir}')
         print(f'  overlay metadata  -> {overlay_writer.metadata_dir}')
+        if fundus_mode != 'none':
+            config_path = write_resolved_config(
+                ensure_dir(overlay_writer.metadata_dir) / 'config.yaml', cfg,
+            )
+            print(f'  resolved config   -> {config_path}')
 
 
 if __name__ == '__main__':

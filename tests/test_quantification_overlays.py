@@ -26,6 +26,7 @@ PATH_FIELDS = {
     "overlay_polar_hard_path", "overlay_cartesian_hard_path",
     "overlay_polar_soft_path", "overlay_cartesian_soft_path",
     "overlay_gt_polar_path", "overlay_gt_cartesian_path",
+    "overlay_fundus_path", "overlay_gt_fundus_path",
 }
 RADII = [10, 9, 6, 4, 1, 8, 6, 4]
 WIDTHS = [0, 1, 2, 5, 0, 2, 0, 1]

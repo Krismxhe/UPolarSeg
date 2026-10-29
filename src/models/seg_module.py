@@ -143,7 +143,7 @@ class SegModule(pl.LightningModule):
         self._prediction_writer = None
         self._quantification_overlay_writer = None
 
-        from src.evaluation.quantification_overlays import normalize_overlay_mode
+        from src.evaluation.quantification_overlays import normalize_fundus_mode, normalize_overlay_mode
 
         eval_cfg = cfg.get('eval', {}) or {}
         self._quantification_overlay_mode = normalize_overlay_mode(
@@ -152,8 +152,19 @@ class SegModule(pl.LightningModule):
         self._quantification_gt_overlay_mode = normalize_overlay_mode(
             eval_cfg.get('save_quantification_gt_overlays', 'none')
         )
+        self._fundus_overlay_mode = normalize_fundus_mode(
+            eval_cfg.get('save_fundus_overlays', 'none')
+        )
+        self._prediction_overlay_active = (
+            self._quantification_overlay_mode != 'none'
+            or self._fundus_overlay_mode in {'prediction', 'both'}
+        )
+        self._groundtruth_overlay_active = (
+            self._quantification_gt_overlay_mode != 'none'
+            or self._fundus_overlay_mode in {'groundtruth', 'both'}
+        )
         self._quantification_overlay_active = (
-            self._quantification_overlay_mode != 'none' or self._quantification_gt_overlay_mode != 'none'
+            self._prediction_overlay_active or self._groundtruth_overlay_active
         )
         self._quantification_overlay_source = str(
             eval_cfg.get('quantification_overlay_source', 'seg_logits')
@@ -161,15 +172,15 @@ class SegModule(pl.LightningModule):
         self._quantification_overlay_readouts = str(
             eval_cfg.get('quantification_overlay_readouts', 'both')
         ).strip().lower()
-        if self._quantification_overlay_mode != 'none':
+        if self._prediction_overlay_active:
             if self._quantification_overlay_source not in {'seg_logits', 'quantification'}:
                 raise ValueError(
                     "eval.quantification_overlay_source must be 'seg_logits' or 'quantification'."
                 )
-            if self._quantification_overlay_readouts not in {'hard', 'soft', 'both'}:
-                raise ValueError(
-                    "eval.quantification_overlay_readouts must be 'hard', 'soft', or 'both'."
-                )
+        if self._quantification_overlay_mode != 'none' and self._quantification_overlay_readouts not in {'hard', 'soft', 'both'}:
+            raise ValueError(
+                "eval.quantification_overlay_readouts must be 'hard', 'soft', or 'both'."
+            )
 
         # Optional multi-task eval outputs (Phase 9b); default OFF so the
         # segmentation baseline is unaffected.
@@ -196,7 +207,7 @@ class SegModule(pl.LightningModule):
 
         self._odppa_metadata = (
             load_metadata_csv(odppa_cfg.get("metadata_csv", None))
-            if self._odppa_eval_enabled or self._quantification_gt_overlay_mode != 'none'
+            if self._odppa_eval_enabled or self._groundtruth_overlay_active
             else {}
         )
 
@@ -269,24 +280,28 @@ class SegModule(pl.LightningModule):
         readout = self._quantification_readout()
         if readout is None:
             raise ValueError('Quantification overlays require an available polar readout.')
-        if self._quantification_gt_overlay_mode != 'none' and target_masks is None:
+        if self._groundtruth_overlay_active and target_masks is None:
             raise ValueError('Ground-truth quantification overlays require target masks.')
 
         mask = hard = soft = groundtruth_mask = groundtruth_hard = None
         source = 'seg_logits'
-        if self._quantification_overlay_mode != 'none':
+        if self._prediction_overlay_active:
             use_quantification = self._quantification_overlay_source == 'quantification'
             logits = quant_logits if use_quantification else seg_logits
             source = prediction_source if use_quantification else 'seg_logits'
             mask = logits.argmax(dim=1)
             reuse = diagnostics is not None and source == prediction_source
-            if self._quantification_overlay_readouts in {'hard', 'both'}:
+            need_hard = self._fundus_overlay_mode in {'prediction', 'both'} or (
+                self._quantification_overlay_mode != 'none'
+                and self._quantification_overlay_readouts in {'hard', 'both'}
+            )
+            if need_hard:
                 hard = diagnostics['hard'] if reuse else readout.measure_mask(mask)
-            if self._quantification_overlay_readouts in {'soft', 'both'}:
+            if self._quantification_overlay_mode != 'none' and self._quantification_overlay_readouts in {'soft', 'both'}:
                 soft = diagnostics['soft'] if reuse else readout.read_probabilities(
                     logits.float().softmax(dim=1)
                 )
-        if self._quantification_gt_overlay_mode != 'none':
+        if self._groundtruth_overlay_active:
             groundtruth_mask = target_masks.to(device=readout.valid_grid.device)
             groundtruth_hard = (
                 diagnostics['target'] if diagnostics is not None
@@ -309,6 +324,7 @@ class SegModule(pl.LightningModule):
 
     def _save_quantification_overlay(
         self, writer, payload, index, case_id, original_size=None, reference_complete=True,
+        image_path=None,
     ):
         """Save one case using the same payload contract in evaluation and the CLI."""
         def case_readout(values):
@@ -326,6 +342,7 @@ class SegModule(pl.LightningModule):
             ),
             groundtruth_hard=case_readout(payload['groundtruth_hard']),
             reference_complete=reference_complete,
+            image_path=image_path,
         )
 
     # ── Loss helper ───────────────────────────────────────────────────────────
@@ -761,6 +778,8 @@ class SegModule(pl.LightningModule):
                 'overlay_gt_polar_path': '',
                 'overlay_gt_cartesian_path': '',
                 'overlay_metadata_path': '',
+                'overlay_fundus_path': '',
+                'overlay_gt_fundus_path': '',
                 'per_class': per_class,
             }
 
@@ -836,7 +855,7 @@ class SegModule(pl.LightningModule):
             if overlay_writer is not None and overlay_batch is not None:
                 record.update(self._save_quantification_overlay(
                     overlay_writer, overlay_batch, b, case_id, original_size=original_size,
-                    reference_complete=complete,
+                    reference_complete=complete, image_path=image_path,
                 ))
             self.test_records.append(record)
 

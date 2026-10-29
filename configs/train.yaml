@@ -61,6 +61,8 @@ eval:
   quantification_overlay_readouts: both  # hard | soft | both
   quantification_overlay_source: seg_logits  # seg_logits | quantification (adapter if present)
   quantification_overlay_legend: true
+  save_fundus_overlays: none  # none | prediction | groundtruth | both; hard measurements on the RGB image
+  fundus_overlay_alpha: 0.0  # [0, 1]; optional mask-colour blend beneath measurement lines
   threshold: 0.5            # binary: sigmoid(logits) > threshold
   include_background: false # exclude background from mean_* unless true
   output_dir: null          # default: <save_dir>/<logging.name>/eval/<split>

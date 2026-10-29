@@ -26,6 +26,8 @@ A per-case record is::
         "overlay_gt_polar_path": str,           # independent hard ground truth
         "overlay_gt_cartesian_path": str,
         "overlay_metadata_path": str,           # measurement geometry/source JSON
+        "overlay_fundus_path": str,             # hard predictions on the RGB image
+        "overlay_gt_fundus_path": str,          # hard ground truth on the RGB image
         "per_class": {class_value: {dice, iou, precision, recall, support}},
     }
 
@@ -74,6 +76,7 @@ OVERLAY_PATH_FIELDS = [
     "overlay_polar_hard_path", "overlay_cartesian_hard_path",
     "overlay_polar_soft_path", "overlay_cartesian_soft_path",
     "overlay_gt_polar_path", "overlay_gt_cartesian_path", "overlay_metadata_path",
+    "overlay_fundus_path", "overlay_gt_fundus_path",
 ]
 EXPORT_PATH_FIELDS = PREDICTION_PATH_FIELDS + OVERLAY_PATH_FIELDS
 

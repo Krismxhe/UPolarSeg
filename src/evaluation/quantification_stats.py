@@ -60,6 +60,7 @@ _TEXT_FIELDS = {
     "overlay_polar_hard_path", "overlay_cartesian_hard_path",
     "overlay_polar_soft_path", "overlay_cartesian_soft_path",
     "overlay_gt_polar_path", "overlay_gt_cartesian_path",
+    "overlay_fundus_path", "overlay_gt_fundus_path",
     *(set(QUANTIFICATION_FIELDS) - _QUANT_BOOL_FIELDS - _QUANT_NUMBER_FIELDS),
 }
 

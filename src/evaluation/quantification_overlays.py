@@ -18,6 +18,15 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from src.evaluation.fundus_overlays import (
+    FUNDUS_CONTOUR_COLORS,
+    draw_fundus_contours,
+    fundus_background,
+    load_fundus_rgb,
+    normalize_fundus_mode,
+    resize_fundus_rgb,
+    validate_fundus_alpha,
+)
 from src.evaluation.prediction_masks import (
     _as_hw,
     _atomic_save_png,
@@ -326,7 +335,10 @@ def _segments(measurements, space):
 def _legend(canvas, metadata, space):
     h, w = canvas.shape[:2]
     is_groundtruth = metadata.get("panel_kind") == "groundtruth"
-    if is_groundtruth:
+    is_fundus = metadata.get("background_kind") == "fundus"
+    if is_fundus:
+        heading = "Fundus RGB | hard boundaries | ROI px"
+    elif is_groundtruth:
         heading = "ROI px | ground truth boundaries"
     elif "soft" in metadata["readouts"]:
         heading = "ROI px | soft: equivalent occupation"
@@ -335,6 +347,12 @@ def _legend(canvas, metadata, space):
     rows = [(None, heading)]
     source = "Ground truth hard" if is_groundtruth else metadata["prediction_source"]
     rows.append((None, f"{source} | {metadata['dv_mode']}"))
+    if is_fundus:
+        rows.extend((
+            (FUNDUS_CONTOUR_COLORS["od"], "OD contour"),
+            (FUNDUS_CONTOUR_COLORS["ppa"], "PPA contour"),
+            ((245, 245, 245), "Center: configured polar origin"),
+        ))
     for kind, data in metadata["readouts"].items():
         prefix = "Ground truth hard" if is_groundtruth else kind.capitalize()
         if not data["valid"]:
@@ -369,8 +387,12 @@ def _legend(canvas, metadata, space):
 
     def score(anchor):
         x, y = anchor
-        region = canvas[y:y + box_height, x:x + box_width]
-        foreground = float(np.any(region != _PALETTE[0], axis=-1).mean())
+        avoid_mask = metadata.get("_legend_foreground")
+        if avoid_mask is not None:
+            foreground = float(avoid_mask[y:y + box_height, x:x + box_width].mean())
+        else:
+            region = canvas[y:y + box_height, x:x + box_width]
+            foreground = float(np.any(region != _PALETTE[0], axis=-1).mean())
         overlaps = 0
         for _, _, pair in segments:
             xs, ys = zip(*pair)
@@ -398,6 +420,50 @@ def _render(mask, metadata, space, show_legend):
             pair = [[x, y + offset] for x, y in points]
             _draw_line(canvas, pair, _COLORS[kind][metric], dashed=kind == "soft", thickness=thickness)
     return canvas
+
+
+def _render_fundus(rgb, mask, metadata, *, readout, alpha, show_legend, center):
+    """Draw hard geometry directly over a Cartesian photograph and contours."""
+    canvas = fundus_background(rgb, mask, alpha, od_class=readout.od_class,
+                               ppa_class=readout.ppa_class)
+    panel_metadata = {**metadata, "background_kind": "fundus", "_legend_foreground": mask != 0}
+    if show_legend:
+        canvas = _legend(canvas, panel_metadata, "cartesian")
+    thickness = max(1, min(3, round(min(canvas.shape[:2]) / 256)))
+    draw_fundus_contours(canvas, mask, od_class=readout.od_class,
+                         ppa_class=readout.ppa_class, thickness=thickness)
+    for kind, metric, points in _segments(metadata["readouts"], "cartesian"):
+        color = _COLORS[kind][metric]
+        _draw_line(canvas, points, color, dashed=False, thickness=thickness)
+        marker_radius = max(2, thickness + 1)
+        for point in points:
+            fixed_point = tuple(np.rint(np.asarray(point) * 256).astype(int))
+            cv2.circle(canvas, fixed_point, (marker_radius + 1) * 256, (12, 16, 22),
+                       -1, cv2.LINE_AA, shift=8)
+            cv2.circle(canvas, fixed_point, marker_radius * 256, color,
+                       -1, cv2.LINE_AA, shift=8)
+    # This marker identifies the configured coordinate origin even for invalid
+    # hard masks; it is not a replacement for a suppressed measurement line.
+    x, y = center
+    arm = max(3, thickness + 3)
+    for pair in ([[x - arm, y], [x + arm, y]], [[x, y - arm], [x, y + arm]]):
+        _draw_line(canvas, pair, (12, 16, 22), dashed=False, thickness=thickness + 2)
+        _draw_line(canvas, pair, (245, 245, 245), dashed=False, thickness=thickness)
+    return canvas
+
+
+def _groundtruth_measurement(data, *, reference_complete, **geometry):
+    """Apply the same annotation-completeness rules to every GT background."""
+    complete = _annotation_complete(reference_complete)
+    measurement = _measurement(data, "hard", **geometry)
+    measurement["pmw_annotation_valid"] = complete
+    measurement["pvdr_annotation_valid"] = complete
+    for metric in ("pmw", "dv", "dh"):
+        item = measurement[metric]
+        if item is not None:
+            item["annotation_valid"] = complete if metric == "pmw" else True
+            item["status"] = "unannotated" if metric == "pmw" and not complete else measurement["status"]
+    return {"source": "ground_truth", "hard": measurement, "annotation_complete": complete}
 
 
 def _json_safe(value):
@@ -432,15 +498,20 @@ class QuantificationOverlayWriter:
 
     Prediction readouts may be combined or written as separate hard/soft panels.
     Ground-truth panels are independent and always use the supplied GT hard
-    measurement. No probability conversion or numerical readout runs here.
+    measurement. Optional Cartesian fundus photographs always display hard
+    measurements, independently of mask-overlay layout and readout selection.
+    No probability conversion or numerical readout runs here.
     """
 
     def __init__(self, cfg, output_dir, mode=None, *, polar_dir=None, cartesian_dir=None,
-                 metadata_dir=None, gt_polar_dir=None, gt_cartesian_dir=None):
+                 metadata_dir=None, gt_polar_dir=None, gt_cartesian_dir=None,
+                 fundus_dir=None, gt_fundus_dir=None):
         self.cfg = cfg
         evaluation = _cfg_get(cfg, "eval", {}) or {}
         self.mode = normalize_overlay_mode(_cfg_get(evaluation, "save_quantification_overlays", "none") if mode is None else mode)
         self.gt_mode = normalize_overlay_mode(_cfg_get(evaluation, "save_quantification_gt_overlays", "none"))
+        self.fundus_mode = normalize_fundus_mode(_cfg_get(evaluation, "save_fundus_overlays", "none"))
+        self.fundus_alpha = validate_fundus_alpha(_cfg_get(evaluation, "fundus_overlay_alpha", 0.0))
         self.layout = str(_cfg_get(evaluation, "quantification_overlay_layout", "combined")).strip().lower()
         if self.layout not in {"combined", "separate"}:
             raise ValueError("eval.quantification_overlay_layout must be combined or separate")
@@ -457,25 +528,34 @@ class QuantificationOverlayWriter:
         self.metadata_dir = Path(metadata_dir) if metadata_dir is not None else output_dir / "overlay_metadata"
         self.gt_polar_dir = Path(gt_polar_dir) if gt_polar_dir is not None else output_dir / "overlays_gt_polar"
         self.gt_cartesian_dir = Path(gt_cartesian_dir) if gt_cartesian_dir is not None else output_dir / "overlays_gt_cartesian"
+        self.fundus_dir = Path(fundus_dir) if fundus_dir is not None else output_dir / "overlays_fundus"
+        self.gt_fundus_dir = Path(gt_fundus_dir) if gt_fundus_dir is not None else output_dir / "overlays_gt_fundus"
 
     @property
     def needs_original_size(self):
         return self.cartesian_size == "original" and (
             self.mode in {"cartesian", "both"} or self.gt_mode in {"cartesian", "both"}
+            or self.fundus_mode != "none"
         )
 
     def save(self, mask, case_id, *, readout, hard, soft, original_size=None,
              prediction_source="seg_logits", groundtruth_mask=None, groundtruth_hard=None,
-             reference_complete=True):
+             reference_complete=True, image_path=None):
         paths = {
             "overlay_polar_path": "", "overlay_cartesian_path": "",
             "overlay_polar_hard_path": "", "overlay_cartesian_hard_path": "",
             "overlay_polar_soft_path": "", "overlay_cartesian_soft_path": "",
             "overlay_gt_polar_path": "", "overlay_gt_cartesian_path": "",
+            "overlay_fundus_path": "", "overlay_gt_fundus_path": "",
             "overlay_metadata_path": "",
         }
-        pred_active = self.mode != "none"
-        gt_active = self.gt_mode != "none"
+        pred_overlay_active = self.mode != "none"
+        gt_overlay_active = self.gt_mode != "none"
+        want_fundus = self.fundus_mode in {"prediction", "both"}
+        want_gt_fundus = self.fundus_mode in {"groundtruth", "both"}
+        fundus_active = want_fundus or want_gt_fundus
+        pred_active = pred_overlay_active or want_fundus
+        gt_active = gt_overlay_active or want_gt_fundus
         if not pred_active and not gt_active:
             return paths
         if pred_active and prediction_source not in {"seg_logits", "quant_logits"}:
@@ -498,8 +578,20 @@ class QuantificationOverlayWriter:
         want_cart = self.mode in {"cartesian", "both"}
         want_gt_polar = self.gt_mode in {"polar", "both"}
         want_gt_cart = self.gt_mode in {"cartesian", "both"}
+        rgb = None
+        source_shape = None
+        if fundus_active:
+            rgb = load_fundus_rgb(image_path)
+            source_shape = tuple(rgb.shape[:2])
+            if original_size is not None:
+                declared_shape = _as_hw(original_size, "original_size", allow_square=False)
+                if declared_shape != source_shape:
+                    raise ValueError(
+                        f"original_size={declared_shape} does not match fundus image_path size {source_shape}"
+                    )
+            original_size = source_shape
         output_shape = None
-        if want_cart or want_gt_cart:
+        if want_cart or want_gt_cart or fundus_active:
             if self.cartesian_size == "original":
                 if original_size is None:
                     raise ValueError("original_size=(H, W) is required for original Cartesian overlays")
@@ -508,7 +600,7 @@ class QuantificationOverlayWriter:
                 output_shape = _input_shape(self.cfg)
 
         measurements = {}
-        if pred_active:
+        if pred_overlay_active:
             for kind, data in (("hard", hard), ("soft", soft)):
                 if self.readouts in {kind, "both"}:
                     measurements[kind] = _measurement(
@@ -516,23 +608,34 @@ class QuantificationOverlayWriter:
                         output_shape=output_shape if want_cart else None,
                     )
         groundtruth_record = {}
-        if gt_active:
-            complete = _annotation_complete(reference_complete)
-            gt_measurement = _measurement(
-                groundtruth_hard, "hard", readout=readout, center=center, input_shape=input_shape,
+        if gt_overlay_active:
+            groundtruth_record = _groundtruth_measurement(
+                groundtruth_hard, reference_complete=reference_complete,
+                readout=readout, center=center, input_shape=input_shape,
                 output_shape=output_shape if want_gt_cart else None,
             )
-            gt_measurement["pmw_annotation_valid"] = complete
-            gt_measurement["pvdr_annotation_valid"] = complete
-            for metric in ("pmw", "dv", "dh"):
-                item = gt_measurement[metric]
-                if item is not None:
-                    item["annotation_valid"] = complete if metric == "pmw" else True
-                    item["status"] = "unannotated" if metric == "pmw" and not complete else gt_measurement["status"]
-            groundtruth_record = {
-                "source": "ground_truth", "hard": gt_measurement,
-                "annotation_complete": complete,
+        fundus_record = {}
+        if fundus_active:
+            fundus_record = {
+                "mode": self.fundus_mode, "source_image": str(image_path),
+                "original_shape": list(source_shape), "output_shape": list(output_shape),
+                "output_center_xy": _output_points([center], input_shape, output_shape)[0],
+                "alpha": self.fundus_alpha, "units": "resized_roi_px",
+                "contour_colors_rgb": {key: list(value) for key, value in FUNDUS_CONTOUR_COLORS.items()},
+                "prediction_source": prediction_source if want_fundus else None,
+                "prediction": {}, "groundtruth": {},
             }
+            if want_fundus:
+                fundus_record["prediction"] = {"hard": _measurement(
+                    hard, "hard", readout=readout, center=center,
+                    input_shape=input_shape, output_shape=output_shape,
+                )}
+            if want_gt_fundus:
+                fundus_record["groundtruth"] = _groundtruth_measurement(
+                    groundtruth_hard, reference_complete=reference_complete,
+                    readout=readout, center=center, input_shape=input_shape,
+                    output_shape=output_shape,
+                )
         metadata = {
             "schema_version": "quantification-overlay-v1",
             "case_id": stem, "prediction_source": prediction_source if pred_active else None,
@@ -550,15 +653,25 @@ class QuantificationOverlayWriter:
             "cartesian_resize_coordinate_rule": "(coordinate+0.5)*output_size/input_size-0.5",
             "readouts": measurements,
             "groundtruth": groundtruth_record,
+            "fundus": fundus_record,
         }
         prepared = []
-        if pred_active:
+        cartesian_masks = {}
+
+        def cartesian_mask(kind):
+            if kind not in cartesian_masks:
+                polar_mask = prediction if kind == "prediction" else groundtruth
+                cartesian_masks[kind] = _resize_mask(
+                    _warp_mask(polar_mask, self.cfg, inverse=True), output_shape,
+                )
+            return cartesian_masks[kind]
+
+        if pred_overlay_active:
             prediction_panels = []
             if want_polar:
                 prediction_panels.append(("polar", prediction, self.polar_dir))
             if want_cart:
-                cartesian = _resize_mask(_warp_mask(prediction, self.cfg, inverse=True), output_shape)
-                prediction_panels.append(("cartesian", cartesian, self.cartesian_dir))
+                prediction_panels.append(("cartesian", cartesian_mask("prediction"), self.cartesian_dir))
             for space, base, directory in prediction_panels:
                 if self.layout == "combined":
                     prepared.append((f"overlay_{space}_path", _render(base, metadata, space, self.legend),
@@ -570,16 +683,31 @@ class QuantificationOverlayWriter:
                             f"overlay_{space}_{kind}_path", _render(base, panel_metadata, space, self.legend),
                             directory / kind / f"{stem}.png",
                         ))
-        if gt_active:
+        if gt_overlay_active:
             panel_metadata = {**metadata, "panel_kind": "groundtruth",
                               "readouts": {"hard": groundtruth_record["hard"]}}
             if want_gt_polar:
                 prepared.append(("overlay_gt_polar_path", _render(groundtruth, panel_metadata, "polar", self.legend),
                                  self.gt_polar_dir / f"{stem}.png"))
             if want_gt_cart:
-                gt_cartesian = _resize_mask(_warp_mask(groundtruth, self.cfg, inverse=True), output_shape)
-                prepared.append(("overlay_gt_cartesian_path", _render(gt_cartesian, panel_metadata, "cartesian", self.legend),
+                prepared.append(("overlay_gt_cartesian_path", _render(cartesian_mask("groundtruth"), panel_metadata, "cartesian", self.legend),
                                  self.gt_cartesian_dir / f"{stem}.png"))
+        if fundus_active:
+            fundus_rgb = resize_fundus_rgb(rgb, output_shape)
+            for selected, kind, key, directory in (
+                (want_fundus, "prediction", "overlay_fundus_path", self.fundus_dir),
+                (want_gt_fundus, "groundtruth", "overlay_gt_fundus_path", self.gt_fundus_dir),
+            ):
+                if not selected:
+                    continue
+                panel_metadata = {**metadata, "panel_kind": kind,
+                                  "readouts": {"hard": fundus_record[kind]["hard"]}}
+                rendered = _render_fundus(
+                    fundus_rgb, cartesian_mask(kind), panel_metadata, readout=readout,
+                    alpha=self.fundus_alpha, show_legend=self.legend,
+                    center=fundus_record["output_center_xy"],
+                )
+                prepared.append((key, rendered, directory / f"{stem}.png"))
         destinations = [destination.resolve() for _, _, destination in prepared]
         if len(set(destinations)) != len(destinations):
             raise ValueError("Selected overlay output paths must be distinct")
