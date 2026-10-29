@@ -264,6 +264,7 @@ def test_overlay_original_size_falls_back_to_image_path(module_factory, tmp_path
 @pytest.mark.parametrize('odppa', [False, True])
 def test_overlay_paths_are_appended_and_preserved_in_all_case_csvs(module_factory, monkeypatch, tmp_path, odppa):
     from src.evaluation.evaluator import OVERLAY_PATH_FIELDS, SegEvaluator
+    from src.evaluation.error_maps import ERROR_MAP_PATH_FIELDS
     from src.evaluation.quantification_stats import read_reference_csv
 
     model = module_factory(overlay='polar')
@@ -283,11 +284,14 @@ def test_overlay_paths_are_appended_and_preserved_in_all_case_csvs(module_factor
     for name in ['per_case', 'quantification_per_case']:
         with Path(outputs[name]).open(newline='') as stream:
             reader = csv.DictReader(stream)
-            assert reader.fieldnames[-len(OVERLAY_PATH_FIELDS):] == OVERLAY_PATH_FIELDS
+            offset = reader.fieldnames.index(OVERLAY_PATH_FIELDS[0])
+            assert reader.fieldnames[offset:offset + len(OVERLAY_PATH_FIELDS)] == OVERLAY_PATH_FIELDS
+            assert reader.fieldnames[-len(ERROR_MAP_PATH_FIELDS):] == list(ERROR_MAP_PATH_FIELDS)
             row = next(reader)
         for key in OVERLAY_PATH_FIELDS:
             assert row[key] == model.test_records[0][key]
         parsed = read_reference_csv(outputs[name])[0]
+        assert all(row[key] == parsed[key] == '' for key in ERROR_MAP_PATH_FIELDS)
         assert parsed['case_id'] == '001'
         assert parsed['overlay_polar_path'] == row['overlay_polar_path']
 

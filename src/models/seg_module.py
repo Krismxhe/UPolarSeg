@@ -31,6 +31,7 @@ from src.datasets.batch import original_size_from_metadata, unpack_batch
 from src.losses.factory import build_loss
 from src.models.factory import build_model
 from src.models.outputs import normalize_model_output
+from src.evaluation.error_maps import ERROR_MAP_PATH_FIELDS
 
 from src.losses.polar_quantification import (
     QUANT_VAL_KEYS,
@@ -142,10 +143,21 @@ class SegModule(pl.LightningModule):
         self.test_records = []
         self._prediction_writer = None
         self._quantification_overlay_writer = None
+        self._error_map_writer = None
 
         from src.evaluation.quantification_overlays import normalize_fundus_mode, normalize_overlay_mode
+        from src.evaluation.error_maps import (
+            normalize_error_classes, normalize_error_mode, parse_error_fundus_flag,
+        )
 
         eval_cfg = cfg.get('eval', {}) or {}
+        self._error_map_mode = normalize_error_mode(eval_cfg.get('save_error_maps', 'none'))
+        self._error_map_save_fundus = parse_error_fundus_flag(eval_cfg.get('save_error_fundus', False))
+        self._error_map_active = self._error_map_mode != 'none' or self._error_map_save_fundus
+        self._error_map_classes = normalize_error_classes(eval_cfg.get('error_map_classes', 'both'))
+        self._error_map_source = str(eval_cfg.get('error_map_source', 'seg_logits')).strip().lower()
+        if self._error_map_active and self._error_map_source not in {'seg_logits', 'quantification'}:
+            raise ValueError("eval.error_map_source must be 'seg_logits' or 'quantification'.")
         self._quantification_overlay_mode = normalize_overlay_mode(
             eval_cfg.get('save_quantification_overlays', 'none')
         )
@@ -207,7 +219,7 @@ class SegModule(pl.LightningModule):
 
         self._odppa_metadata = (
             load_metadata_csv(odppa_cfg.get("metadata_csv", None))
-            if self._odppa_eval_enabled or self._groundtruth_overlay_active
+            if self._odppa_eval_enabled or self._groundtruth_overlay_active or self._error_map_active
             else {}
         )
 
@@ -343,6 +355,45 @@ class SegModule(pl.LightningModule):
             groundtruth_hard=case_readout(payload['groundtruth_hard']),
             reference_complete=reference_complete,
             image_path=image_path,
+        )
+
+    @torch.no_grad()
+    def _error_map_batch(self, seg_logits, quant_logits, prediction_source, *, target_masks=None):
+        """Select the requested error source without a readout or another forward.
+
+        These CPU arrays are transient writer inputs; DDP records retain only
+        exported paths. Cartesian error maps read their reference from mask_path.
+        """
+        if not self._error_map_active:
+            return None
+        if self._error_map_mode in {'polar', 'both'} and target_masks is None:
+            raise ValueError('Polar error maps require target masks from the input batch.')
+        use_quantification = self._error_map_source == 'quantification'
+        logits = quant_logits if use_quantification else seg_logits
+        source = prediction_source if use_quantification else 'seg_logits'
+        return {
+            'mask': logits.argmax(dim=1).detach().cpu().numpy(),
+            'groundtruth_mask': (
+                None if target_masks is None else target_masks.detach().cpu().numpy()
+            ),
+            'prediction_source': source,
+        }
+
+    def _save_error_map(
+        self, writer, payload, index, case_id, original_size=None, reference_complete=True,
+        mask_path=None, image_path=None,
+    ):
+        """Forward one case's raw paths and alignment metadata to the error writer."""
+        return writer.save(
+            payload['mask'][index], case_id,
+            groundtruth_mask=(
+                None if payload['groundtruth_mask'] is None else payload['groundtruth_mask'][index]
+            ),
+            mask_path=mask_path,
+            image_path=image_path,
+            original_size=original_size,
+            reference_complete=reference_complete,
+            prediction_source=payload['prediction_source'],
         )
 
     # ── Loss helper ───────────────────────────────────────────────────────────
@@ -537,16 +588,18 @@ class SegModule(pl.LightningModule):
         self.test_records = []
         self._prediction_writer = None
         self._quantification_overlay_writer = None
+        self._error_map_writer = None
 
         # Each DDP rank saves its own samples. CSV export and rank-zero report
         # generation happen separately after all records have been gathered.
         from hydra.utils import to_absolute_path
         from src.evaluation.prediction_masks import PredictionMaskWriter, normalize_save_mode
         from src.evaluation.quantification_overlays import QuantificationOverlayWriter
+        from src.evaluation.error_maps import ErrorMapWriter
 
         eval_cfg = self.cfg.get('eval', {}) or {}
         mode = normalize_save_mode(eval_cfg.get('save_predictions', 'none'))
-        if mode != 'none' or self._quantification_overlay_active:
+        if mode != 'none' or self._quantification_overlay_active or self._error_map_active:
             default_dir = os.path.join(
                 self.cfg.logging.save_dir, self.cfg.logging.name, 'eval', self.eval_split,
             )
@@ -557,6 +610,8 @@ class SegModule(pl.LightningModule):
                 self._quantification_overlay_writer = QuantificationOverlayWriter(
                     self.cfg, output_dir, mode=self._quantification_overlay_mode,
                 )
+            if self._error_map_active:
+                self._error_map_writer = ErrorMapWriter(self.cfg, output_dir)
 
         for metric in self.quant_test_metrics.values():
             metric.reset()
@@ -594,6 +649,9 @@ class SegModule(pl.LightningModule):
         overlay_batch = self._quantification_overlay_batch(
             logits, quant_logits, prediction_source, diagnostics=diagnostics, target_masks=masks,
         )
+        error_batch = self._error_map_batch(
+            logits, quant_logits, prediction_source, target_masks=masks,
+        )
 
         self._collect_records(
             logits,
@@ -603,6 +661,7 @@ class SegModule(pl.LightningModule):
             batch_idx,
             quant_records=quant_records,
             overlay_batch=overlay_batch,
+            error_batch=error_batch,
         )
 
         if quant_stats is not None:
@@ -699,6 +758,7 @@ class SegModule(pl.LightningModule):
 
     def _collect_records(
         self, logits, preds, masks, meta, batch_idx, quant_records=None, overlay_batch=None,
+        error_batch=None,
     ):
         from src.metrics.functional import case_class_metrics, predict_from_logits
 
@@ -708,6 +768,10 @@ class SegModule(pl.LightningModule):
             for key in ('mask', 'groundtruth_mask'):
                 if overlay_batch[key] is not None and len(overlay_batch[key]) != masks.shape[0]:
                     raise ValueError('Segmentation and overlay batches must have the same case count.')
+        if error_batch is not None:
+            for key in ('mask', 'groundtruth_mask'):
+                if error_batch[key] is not None and len(error_batch[key]) != masks.shape[0]:
+                    raise ValueError('Segmentation and error-map batches must have the same case count.')
 
         # Keep CSVs, saved masks, and aggregate test metrics on one threshold.
         if self._is_binary:
@@ -782,6 +846,7 @@ class SegModule(pl.LightningModule):
                 'overlay_gt_fundus_path': '',
                 'per_class': per_class,
             }
+            record.update({field: '' for field in ERROR_MAP_PATH_FIELDS})
 
             case_metadata = dict(self._odppa_metadata.get(case_id, {}))
             for field in ("patient_id", "eye", "reference_complete"):
@@ -837,14 +902,21 @@ class SegModule(pl.LightningModule):
 
             writer = self._prediction_writer
             overlay_writer = self._quantification_overlay_writer
+            error_writer = self._error_map_writer
             original_size = None
             mask_needs_original = (
                 writer is not None and writer.mode in {'cartesian', 'both'}
                 and writer.cartesian_size == 'original'
             )
-            if mask_needs_original or (overlay_writer is not None and overlay_writer.needs_original_size):
+            overlay_needs_original = overlay_writer is not None and overlay_writer.needs_original_size
+            error_needs_metadata = error_writer is not None and (
+                error_writer.mode in {'cartesian', 'both'} or error_writer.save_fundus
+            )
+            if mask_needs_original or overlay_needs_original or error_needs_metadata:
                 original_size = original_size_from_metadata(meta, b)
-                if original_size is None and image_path:
+                # Error-only Cartesian export can infer this from raw GT. Do
+                # not add an RGB dependency to categorical error maps.
+                if original_size is None and image_path and (mask_needs_original or overlay_needs_original):
                     from PIL import Image
                     with Image.open(image_path) as image:
                         original_size = image.height, image.width
@@ -856,6 +928,11 @@ class SegModule(pl.LightningModule):
                 record.update(self._save_quantification_overlay(
                     overlay_writer, overlay_batch, b, case_id, original_size=original_size,
                     reference_complete=complete, image_path=image_path,
+                ))
+            if error_writer is not None and error_batch is not None:
+                record.update(self._save_error_map(
+                    error_writer, error_batch, b, case_id, original_size=original_size,
+                    reference_complete=complete, mask_path=mask_path, image_path=image_path,
                 ))
             self.test_records.append(record)
 

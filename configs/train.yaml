@@ -63,6 +63,12 @@ eval:
   quantification_overlay_legend: true
   save_fundus_overlays: none  # none | prediction | groundtruth | both; hard measurements on the RGB image
   fundus_overlay_alpha: 0.0  # [0, 1]; optional mask-colour blend beneath measurement lines
+  save_error_maps: none  # none | polar | cartesian | both; per-class FP/FN against GT
+  save_error_fundus: false  # independent FP/FN panels on the Cartesian RGB image
+  error_map_classes: both  # od | ppa | both
+  error_map_source: seg_logits  # seg_logits | quantification (adapter if present)
+  error_map_alpha: 0.6  # [0, 1]; error-colour blend on RGB panels
+  error_map_legend: true  # RGB error panels only; categorical maps retain exact colours
   threshold: 0.5            # binary: sigmoid(logits) > threshold
   include_background: false # exclude background from mean_* unless true
   output_dir: null          # default: <save_dir>/<logging.name>/eval/<split>

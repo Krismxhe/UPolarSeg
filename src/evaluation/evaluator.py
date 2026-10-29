@@ -55,6 +55,7 @@ from src.evaluation.quantification_stats import (
     validate_quantification_records,
 )
 from src.utils.io import ensure_dir, write_csv, write_resolved_config
+from src.evaluation.error_maps import ERROR_MAP_PATH_FIELDS
 
 # Schemas (stable column order).
 SUMMARY_FIELDS = [
@@ -78,7 +79,7 @@ OVERLAY_PATH_FIELDS = [
     "overlay_gt_polar_path", "overlay_gt_cartesian_path", "overlay_metadata_path",
     "overlay_fundus_path", "overlay_gt_fundus_path",
 ]
-EXPORT_PATH_FIELDS = PREDICTION_PATH_FIELDS + OVERLAY_PATH_FIELDS
+EXPORT_PATH_FIELDS = PREDICTION_PATH_FIELDS + OVERLAY_PATH_FIELDS + list(ERROR_MAP_PATH_FIELDS)
 
 _METRICS = ("dice", "iou", "precision", "recall")
 

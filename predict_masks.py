@@ -5,6 +5,7 @@
 --overlay_layout separates hard/soft predictions or combines them in one image.
 --save_gt_overlays independently selects hard ground-truth overlays (default: none).
 --save_fundus_overlays selects hard prediction/GT measurements on the RGB image.
+--save_error_maps and --save_error_fundus independently select per-class FP/FN panels.
 The existing CLI directory layout is retained:
     {output_root}/{model_name}/masks_polar/{dataset_short}/{case_id}.png
     {output_root}/{model_name}/masks_cart/{dataset_short}/{case_id}.png
@@ -25,6 +26,9 @@ from tqdm import tqdm
 from src.datasets.seg_dataset import SegDataModule
 from src.datasets.batch import original_size_from_metadata, unpack_batch
 from src.evaluation.prediction_masks import PredictionMaskWriter
+from src.evaluation.error_maps import (
+    ErrorMapWriter, normalize_error_classes, normalize_error_mode, parse_error_fundus_flag,
+)
 from src.evaluation.quantification_overlays import (
     QuantificationOverlayWriter, normalize_fundus_mode, normalize_overlay_mode,
 )
@@ -78,6 +82,16 @@ def build_parser():
                         help='Hard measurements over RGB images; default follows config (none)')
     parser.add_argument('--fundus_overlay_alpha', type=float, default=None,
                         help='Mask-colour blend opacity in [0, 1]; default follows config (0.0)')
+    parser.add_argument('--save_error_maps', choices=['none', 'polar', 'cartesian', 'both'], default=None,
+                        help='Per-class FP/FN map spaces; default follows config (none)')
+    parser.add_argument('--save_error_fundus', choices=['true', 'false'], default=None,
+                        help='Independently draw FP/FN on the RGB image; default follows config (false)')
+    parser.add_argument('--error_map_classes', choices=['od', 'ppa', 'both'], default=None,
+                        help='Classes to compare with GT; default follows config (both)')
+    parser.add_argument('--error_map_source', choices=['seg_logits', 'quantification'], default=None,
+                        help='Prediction source for errors; default follows config (seg_logits)')
+    parser.add_argument('--error_map_alpha', type=float, default=None,
+                        help='FP/FN opacity on RGB panels in [0, 1]; default follows config (0.6)')
     parser.add_argument('--input_space', choices=['auto', 'polar', 'cartesian'], default='auto',
                         help='auto retains the legacy inference from the dataset config name')
     parser.add_argument('--max_radius', type=float, default=None,
@@ -106,13 +120,23 @@ def main():
         ('quantification_overlay_source', args.overlay_source),
         ('save_fundus_overlays', args.save_fundus_overlays),
         ('fundus_overlay_alpha', args.fundus_overlay_alpha),
+        ('save_error_maps', args.save_error_maps),
+        ('save_error_fundus', None if args.save_error_fundus is None else parse_error_fundus_flag(args.save_error_fundus)),
+        ('error_map_classes', args.error_map_classes),
+        ('error_map_source', args.error_map_source),
+        ('error_map_alpha', args.error_map_alpha),
     ):
         if value is not None:
             OmegaConf.update(cfg, f'eval.{key}', value, force_add=True)
     overlay_mode = normalize_overlay_mode(cfg.eval.get('save_quantification_overlays', 'none'))
     gt_overlay_mode = normalize_overlay_mode(cfg.eval.get('save_quantification_gt_overlays', 'none'))
     fundus_mode = normalize_fundus_mode(cfg.eval.get('save_fundus_overlays', 'none'))
-    if all(mode == 'none' for mode in (args.save_masks, overlay_mode, gt_overlay_mode, fundus_mode)):
+    error_mode = normalize_error_mode(cfg.eval.get('save_error_maps', 'none'))
+    error_fundus = parse_error_fundus_flag(cfg.eval.get('save_error_fundus', False))
+    error_active = error_mode != 'none' or error_fundus
+    error_classes = normalize_error_classes(cfg.eval.get('error_map_classes', 'both'))
+    error_source = str(cfg.eval.get('error_map_source', 'seg_logits')).strip().lower()
+    if not error_active and all(mode == 'none' for mode in (args.save_masks, overlay_mode, gt_overlay_mode, fundus_mode)):
         print('[INFO] All mask and overlay exports disabled; no model or dataset loaded.')
         return
 
@@ -134,10 +158,20 @@ def main():
             fundus_dir=out_dir / 'overlays_fundus' / args.dataset_short,
             gt_fundus_dir=out_dir / 'overlays_gt_fundus' / args.dataset_short,
         )
+    error_writer = None
+    if error_active:
+        error_writer = ErrorMapWriter(
+            cfg, out_dir,
+            polar_dir=out_dir / 'errors_polar' / args.dataset_short,
+            cartesian_dir=out_dir / 'errors_cartesian' / args.dataset_short,
+            fundus_dir=out_dir / 'errors_fundus' / args.dataset_short,
+            metadata_dir=out_dir / 'error_metadata' / args.dataset_short,
+        )
     print(f'\n=== {args.model_name} / {args.dataset_short} ({args.dataset}) ===')
     print(f'input_is_polar = {writer.input_is_polar}; save_masks = {writer.mode}; '
           f'save_overlays = {overlay_mode}; save_gt_overlays = {gt_overlay_mode}; '
-          f'save_fundus_overlays = {fundus_mode}')
+          f'save_fundus_overlays = {fundus_mode}; '
+          f'save_error_maps = {error_mode}; save_error_fundus = {error_fundus}')
 
     datamodule = SegDataModule(cfg, eval_split=str(cfg.split))
     datamodule.setup(stage='test')
@@ -152,13 +186,22 @@ def main():
         for batch in tqdm(loader, desc=f'{args.model_name}/{args.dataset_short}'):
             images, masks, meta = unpack_batch(batch)
             overlay_batch = None
-            if overlay_mode == 'none' and fundus_mode not in {'prediction', 'both'}:
+            error_batch = None
+            needs_evaluation_outputs = (
+                overlay_mode != 'none' or fundus_mode in {'prediction', 'both'}
+                or (error_active and error_source == 'quantification')
+            )
+            if not needs_evaluation_outputs:
                 outputs = normalize_model_output(model(images.to(device)))
                 quant_logits, prediction_source = outputs['seg_logits'], 'seg_logits'
             else:
                 outputs, quant_logits, prediction_source = model._evaluation_outputs(images.to(device))
             if overlay_writer is not None:
                 overlay_batch = model._quantification_overlay_batch(
+                    outputs['seg_logits'], quant_logits, prediction_source, target_masks=masks,
+                )
+            if error_writer is not None:
+                error_batch = model._error_map_batch(
                     outputs['seg_logits'], quant_logits, prediction_source, target_masks=masks,
                 )
             predictions = predict_from_logits(
@@ -170,21 +213,33 @@ def main():
                 mask_needs_original = (
                     writer.mode in {'cartesian', 'both'} and writer.cartesian_size == 'original'
                 )
-                if mask_needs_original or (overlay_writer is not None and overlay_writer.needs_original_size):
+                overlay_needs_original = overlay_writer is not None and overlay_writer.needs_original_size
+                error_needs_metadata = error_writer is not None and (
+                    error_writer.mode in {'cartesian', 'both'} or error_writer.save_fundus
+                )
+                if mask_needs_original or overlay_needs_original or error_needs_metadata:
                     original_size = original_size_from_metadata(meta, index)
-                    if original_size is None and meta.get('image_path'):
+                    if original_size is None and meta.get('image_path') and (mask_needs_original or overlay_needs_original):
                         from PIL import Image
                         with Image.open(meta['image_path'][index]) as image:
                             original_size = image.height, image.width
                 case_id = meta['case_id'][index]
                 writer.save(prediction, case_id, original_size=original_size)
-                if overlay_writer is not None:
+                if overlay_writer is not None or error_writer is not None:
                     complete = model._odppa_metadata.get(str(case_id), {}).get('reference_complete')
                     if complete in (None, ''):
                         complete = model._meta_get(meta, 'reference_complete', index, True)
+                if overlay_writer is not None:
                     model._save_quantification_overlay(
                         overlay_writer, overlay_batch, index, case_id, original_size=original_size,
                         reference_complete=complete,
+                        image_path=model._meta_get(meta, 'image_path', index, ''),
+                    )
+                if error_writer is not None:
+                    model._save_error_map(
+                        error_writer, error_batch, index, case_id, original_size=original_size,
+                        reference_complete=complete,
+                        mask_path=model._meta_get(meta, 'mask_path', index, ''),
                         image_path=model._meta_get(meta, 'image_path', index, ''),
                     )
                 n_saved += 1
@@ -218,6 +273,21 @@ def main():
                 ensure_dir(overlay_writer.metadata_dir) / 'config.yaml', cfg,
             )
             print(f'  resolved config   -> {config_path}')
+    if error_writer is not None:
+        for space, selected, directory in (
+            ('polar', error_mode in {'polar', 'both'}, error_writer.polar_dir),
+            ('cartesian', error_mode in {'cartesian', 'both'}, error_writer.cartesian_dir),
+            ('fundus', error_fundus, error_writer.fundus_dir),
+        ):
+            if selected:
+                for kind in ('od', 'ppa'):
+                    if error_classes in {kind, 'both'}:
+                        print(f'  error {space} {kind} -> {directory / kind}')
+        print(f'  error metadata    -> {error_writer.metadata_dir}')
+        config_path = write_resolved_config(
+            ensure_dir(error_writer.metadata_dir) / 'config.yaml', cfg,
+        )
+        print(f'  error config      -> {config_path}')
 
 
 if __name__ == '__main__':
