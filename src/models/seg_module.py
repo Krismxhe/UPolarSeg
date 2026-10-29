@@ -141,6 +141,35 @@ class SegModule(pl.LightningModule):
         # to write explicit summary/per_class/per_case CSV (Phase 4).
         self.test_records = []
         self._prediction_writer = None
+        self._quantification_overlay_writer = None
+
+        from src.evaluation.quantification_overlays import normalize_overlay_mode
+
+        eval_cfg = cfg.get('eval', {}) or {}
+        self._quantification_overlay_mode = normalize_overlay_mode(
+            eval_cfg.get('save_quantification_overlays', 'none')
+        )
+        self._quantification_gt_overlay_mode = normalize_overlay_mode(
+            eval_cfg.get('save_quantification_gt_overlays', 'none')
+        )
+        self._quantification_overlay_active = (
+            self._quantification_overlay_mode != 'none' or self._quantification_gt_overlay_mode != 'none'
+        )
+        self._quantification_overlay_source = str(
+            eval_cfg.get('quantification_overlay_source', 'seg_logits')
+        ).strip().lower()
+        self._quantification_overlay_readouts = str(
+            eval_cfg.get('quantification_overlay_readouts', 'both')
+        ).strip().lower()
+        if self._quantification_overlay_mode != 'none':
+            if self._quantification_overlay_source not in {'seg_logits', 'quantification'}:
+                raise ValueError(
+                    "eval.quantification_overlay_source must be 'seg_logits' or 'quantification'."
+                )
+            if self._quantification_overlay_readouts not in {'hard', 'soft', 'both'}:
+                raise ValueError(
+                    "eval.quantification_overlay_readouts must be 'hard', 'soft', or 'both'."
+                )
 
         # Optional multi-task eval outputs (Phase 9b); default OFF so the
         # segmentation baseline is unaffected.
@@ -167,7 +196,7 @@ class SegModule(pl.LightningModule):
 
         self._odppa_metadata = (
             load_metadata_csv(odppa_cfg.get("metadata_csv", None))
-            if self._odppa_eval_enabled
+            if self._odppa_eval_enabled or self._quantification_gt_overlay_mode != 'none'
             else {}
         )
 
@@ -180,7 +209,7 @@ class SegModule(pl.LightningModule):
         if self.quantification is not None:
             self._quant_protocol = quantification_protocol(self.quantification)
             self._quant_unavailable_reason = ""
-        elif self._odppa_eval_enabled:
+        elif self._odppa_eval_enabled or self._quantification_overlay_active:
             polar = cfg.get("polar", {}) or {}
             geometry = polar.get("geometry", {}) or {}
             if self.num_classes != 3 or cfg.dataset.mask_mode != "index":
@@ -193,9 +222,16 @@ class SegModule(pl.LightningModule):
                 self._quant_eval_readout = build_polar_readout(cfg)
                 self._quant_protocol = quantification_protocol(self._quant_eval_readout)
                 self._quant_unavailable_reason = ""
-                self.quant_test_metrics = torch.nn.ModuleDict({
-                    name: MeanMetric() for name in QUANT_VAL_KEYS
-                })
+                if self._odppa_eval_enabled or self._quantification_overlay_mode != 'none':
+                    self.quant_test_metrics = torch.nn.ModuleDict({
+                        name: MeanMetric() for name in QUANT_VAL_KEYS
+                    })
+
+        if self._quantification_overlay_active and self._quantification_readout() is None:
+            raise ValueError(
+                'Quantification overlays require three-class index masks on an enabled '
+                'linear polar grid: ' + self._quant_unavailable_reason
+            )
 
     # ── Forward ───────────────────────────────────────────────────────────────
 
@@ -218,6 +254,79 @@ class SegModule(pl.LightningModule):
             return outputs, quant_logits, "quant_logits"
         outputs = normalize_model_output(self(images))
         return outputs, outputs["seg_logits"], "seg_logits"
+
+    @torch.no_grad()
+    def _quantification_overlay_batch(
+        self, seg_logits, quant_logits, prediction_source, *, diagnostics=None, target_masks=None,
+    ):
+        """Prepare one source-consistent batch, reusing evaluation readouts when possible.
+
+        This helper also serves checkpoint export without GT diagnostics. The
+        CPU arrays are transient rendering inputs and never enter DDP records.
+        """
+        if not self._quantification_overlay_active:
+            return None
+        readout = self._quantification_readout()
+        if readout is None:
+            raise ValueError('Quantification overlays require an available polar readout.')
+        if self._quantification_gt_overlay_mode != 'none' and target_masks is None:
+            raise ValueError('Ground-truth quantification overlays require target masks.')
+
+        mask = hard = soft = groundtruth_mask = groundtruth_hard = None
+        source = 'seg_logits'
+        if self._quantification_overlay_mode != 'none':
+            use_quantification = self._quantification_overlay_source == 'quantification'
+            logits = quant_logits if use_quantification else seg_logits
+            source = prediction_source if use_quantification else 'seg_logits'
+            mask = logits.argmax(dim=1)
+            reuse = diagnostics is not None and source == prediction_source
+            if self._quantification_overlay_readouts in {'hard', 'both'}:
+                hard = diagnostics['hard'] if reuse else readout.measure_mask(mask)
+            if self._quantification_overlay_readouts in {'soft', 'both'}:
+                soft = diagnostics['soft'] if reuse else readout.read_probabilities(
+                    logits.float().softmax(dim=1)
+                )
+        if self._quantification_gt_overlay_mode != 'none':
+            groundtruth_mask = target_masks.to(device=readout.valid_grid.device)
+            groundtruth_hard = (
+                diagnostics['target'] if diagnostics is not None
+                else readout.measure_mask(groundtruth_mask)
+            )
+
+        def cpu_readout(values):
+            if values is None:
+                return None
+            return {key: value.detach().cpu().numpy() for key, value in values.items()}
+
+        return {
+            'mask': None if mask is None else mask.detach().cpu().numpy(),
+            'hard': cpu_readout(hard),
+            'soft': cpu_readout(soft),
+            'groundtruth_mask': None if groundtruth_mask is None else groundtruth_mask.detach().cpu().numpy(),
+            'groundtruth_hard': cpu_readout(groundtruth_hard),
+            'prediction_source': source,
+        }
+
+    def _save_quantification_overlay(
+        self, writer, payload, index, case_id, original_size=None, reference_complete=True,
+    ):
+        """Save one case using the same payload contract in evaluation and the CLI."""
+        def case_readout(values):
+            return None if values is None else {key: value[index] for key, value in values.items()}
+
+        return writer.save(
+            None if payload['mask'] is None else payload['mask'][index], case_id,
+            readout=self._quantification_readout(),
+            hard=case_readout(payload['hard']),
+            soft=case_readout(payload['soft']),
+            original_size=original_size,
+            prediction_source=payload['prediction_source'],
+            groundtruth_mask=(
+                None if payload['groundtruth_mask'] is None else payload['groundtruth_mask'][index]
+            ),
+            groundtruth_hard=case_readout(payload['groundtruth_hard']),
+            reference_complete=reference_complete,
+        )
 
     # ── Loss helper ───────────────────────────────────────────────────────────
 
@@ -410,20 +519,27 @@ class SegModule(pl.LightningModule):
     def on_test_epoch_start(self):
         self.test_records = []
         self._prediction_writer = None
+        self._quantification_overlay_writer = None
 
         # Each DDP rank saves its own samples. CSV export and rank-zero report
         # generation happen separately after all records have been gathered.
         from hydra.utils import to_absolute_path
         from src.evaluation.prediction_masks import PredictionMaskWriter, normalize_save_mode
+        from src.evaluation.quantification_overlays import QuantificationOverlayWriter
 
         eval_cfg = self.cfg.get('eval', {}) or {}
         mode = normalize_save_mode(eval_cfg.get('save_predictions', 'none'))
-        if mode != 'none':
+        if mode != 'none' or self._quantification_overlay_active:
             default_dir = os.path.join(
                 self.cfg.logging.save_dir, self.cfg.logging.name, 'eval', self.eval_split,
             )
             output_dir = to_absolute_path(str(eval_cfg.get('output_dir') or default_dir))
-            self._prediction_writer = PredictionMaskWriter(self.cfg, output_dir, mode=mode)
+            if mode != 'none':
+                self._prediction_writer = PredictionMaskWriter(self.cfg, output_dir, mode=mode)
+            if self._quantification_overlay_active:
+                self._quantification_overlay_writer = QuantificationOverlayWriter(
+                    self.cfg, output_dir, mode=self._quantification_overlay_mode,
+                )
 
         for metric in self.quant_test_metrics.values():
             metric.reset()
@@ -440,8 +556,12 @@ class SegModule(pl.LightningModule):
 
         quant_records = None
         quant_stats = None
+        diagnostics = None
         readout = self._quantification_readout()
-        if readout is not None:
+        if readout is not None and (
+            self.quantification is not None or self._odppa_eval_enabled
+            or self._quantification_overlay_mode != 'none'
+        ):
             diagnostics = compute_quantification_diagnostics(readout, quant_logits, masks)
             quant_records = build_quantification_case_records(
                 diagnostics, protocol=self._quant_protocol,
@@ -454,6 +574,10 @@ class SegModule(pl.LightningModule):
                 for _ in range(masks.shape[0])
             ]
 
+        overlay_batch = self._quantification_overlay_batch(
+            logits, quant_logits, prediction_source, diagnostics=diagnostics, target_masks=masks,
+        )
+
         self._collect_records(
             logits,
             preds,
@@ -461,6 +585,7 @@ class SegModule(pl.LightningModule):
             meta,
             batch_idx,
             quant_records=quant_records,
+            overlay_batch=overlay_batch,
         )
 
         if quant_stats is not None:
@@ -555,11 +680,17 @@ class SegModule(pl.LightningModule):
             return value
         return default
 
-    def _collect_records(self, logits, preds, masks, meta, batch_idx, quant_records=None):
+    def _collect_records(
+        self, logits, preds, masks, meta, batch_idx, quant_records=None, overlay_batch=None,
+    ):
         from src.metrics.functional import case_class_metrics, predict_from_logits
 
         if quant_records is not None and len(quant_records) != masks.shape[0]:
             raise ValueError("Segmentation and quantification batches must have the same case count.")
+        if overlay_batch is not None:
+            for key in ('mask', 'groundtruth_mask'):
+                if overlay_batch[key] is not None and len(overlay_batch[key]) != masks.shape[0]:
+                    raise ValueError('Segmentation and overlay batches must have the same case count.')
 
         # Keep CSVs, saved masks, and aggregate test metrics on one threshold.
         if self._is_binary:
@@ -621,6 +752,15 @@ class SegModule(pl.LightningModule):
                 'pred_path': '',
                 'pred_polar_path': '',
                 'pred_cartesian_path': '',
+                'overlay_polar_path': '',
+                'overlay_cartesian_path': '',
+                'overlay_polar_hard_path': '',
+                'overlay_cartesian_hard_path': '',
+                'overlay_polar_soft_path': '',
+                'overlay_cartesian_soft_path': '',
+                'overlay_gt_polar_path': '',
+                'overlay_gt_cartesian_path': '',
+                'overlay_metadata_path': '',
                 'per_class': per_class,
             }
 
@@ -661,14 +801,15 @@ class SegModule(pl.LightningModule):
             # patient grouping for segmentation and quantification statistics.
             patient_id = case_metadata.get("patient_id")
             record["patient_id"] = str(case_id if patient_id in (None, "") else patient_id)
+            complete = case_metadata.get(
+                "reference_complete",
+                self._meta_get(meta, "reference_complete", b,
+                               record.get("reference_complete", True)),
+            )
             if quant_records is not None:
-                complete = case_metadata.get(
-                    "reference_complete",
-                    self._meta_get(meta, "reference_complete", b,
-                                   record.get("reference_complete", True)),
-                )
                 quant_records[b] = apply_annotation_completeness(quant_records[b], complete)
                 record.update(quant_records[b])
+                complete = quant_records[b]['quant_annotation_complete']
 
             if self._clinical_enabled:
                 record['clinical'] = self._case_clinical(pred_b, fg_classes)
@@ -676,16 +817,26 @@ class SegModule(pl.LightningModule):
                 record['boundary'] = self._case_boundary(pred_b, mask_b, fg_classes)
 
             writer = self._prediction_writer
+            overlay_writer = self._quantification_overlay_writer
+            original_size = None
+            mask_needs_original = (
+                writer is not None and writer.mode in {'cartesian', 'both'}
+                and writer.cartesian_size == 'original'
+            )
+            if mask_needs_original or (overlay_writer is not None and overlay_writer.needs_original_size):
+                original_size = original_size_from_metadata(meta, b)
+                if original_size is None and image_path:
+                    from PIL import Image
+                    with Image.open(image_path) as image:
+                        original_size = image.height, image.width
             if writer is not None:
-                original_size = None
-                if writer.mode in {'cartesian', 'both'} and writer.cartesian_size == 'original':
-                    original_size = original_size_from_metadata(meta, b)
-                    if original_size is None and image_path:
-                        from PIL import Image
-                        with Image.open(image_path) as image:
-                            original_size = image.height, image.width
                 record.update(writer.save(
                     pred_b.detach().numpy(), case_id, original_size=original_size,
+                ))
+            if overlay_writer is not None and overlay_batch is not None:
+                record.update(self._save_quantification_overlay(
+                    overlay_writer, overlay_batch, b, case_id, original_size=original_size,
+                    reference_complete=complete,
                 ))
             self.test_records.append(record)
 

@@ -55,6 +55,12 @@ eval:
   save_predictions: none    # none | polar | cartesian | both (false/true also accepted)
   prediction_cartesian_size: original  # original | input; polar retains its grid
   save_overlay: false       # (not implemented yet) save colour overlays
+  save_quantification_overlays: none  # none | polar | cartesian | both; independent of masks/CSV
+  save_quantification_gt_overlays: none  # independent hard-GT overlays in the selected spaces
+  quantification_overlay_layout: combined  # combined | separate (prediction hard/soft files)
+  quantification_overlay_readouts: both  # hard | soft | both
+  quantification_overlay_source: seg_logits  # seg_logits | quantification (adapter if present)
+  quantification_overlay_legend: true
   threshold: 0.5            # binary: sigmoid(logits) > threshold
   include_background: false # exclude background from mean_* unless true
   output_dir: null          # default: <save_dir>/<logging.name>/eval/<split>

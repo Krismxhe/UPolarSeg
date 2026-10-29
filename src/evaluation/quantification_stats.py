@@ -56,6 +56,10 @@ _TEXT_FIELDS = {
     "case_id", "patient_id", "eye", "run_name", "checkpoint", "dataset", "split",
     "model", "encoder", "protocol_version", "ppa_status", "image_path", "mask_path",
     "pred_path", "pred_polar_path", "pred_cartesian_path",
+    "overlay_polar_path", "overlay_cartesian_path", "overlay_metadata_path",
+    "overlay_polar_hard_path", "overlay_cartesian_hard_path",
+    "overlay_polar_soft_path", "overlay_cartesian_soft_path",
+    "overlay_gt_polar_path", "overlay_gt_cartesian_path",
     *(set(QUANTIFICATION_FIELDS) - _QUANT_BOOL_FIELDS - _QUANT_NUMBER_FIELDS),
 }
 

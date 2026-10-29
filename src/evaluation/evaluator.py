@@ -15,6 +15,17 @@ A per-case record is::
         "image_path": str,
         "mask_path": str,
         "pred_path": str,                       # "" unless predictions are saved
+        "pred_polar_path": str,                 # "" unless polar masks are saved
+        "pred_cartesian_path": str,             # "" unless Cartesian masks are saved
+        "overlay_polar_path": str,              # separate RGB visualization files
+        "overlay_cartesian_path": str,
+        "overlay_polar_hard_path": str,         # separate-layout prediction files
+        "overlay_cartesian_hard_path": str,
+        "overlay_polar_soft_path": str,
+        "overlay_cartesian_soft_path": str,
+        "overlay_gt_polar_path": str,           # independent hard ground truth
+        "overlay_gt_cartesian_path": str,
+        "overlay_metadata_path": str,           # measurement geometry/source JSON
         "per_class": {class_value: {dice, iou, precision, recall, support}},
     }
 
@@ -56,6 +67,15 @@ PER_CASE_BASE_FIELDS = [
     "run_name", "split", "case_id", "image_path", "mask_path",
     "dice_mean", "iou_mean", "precision_mean", "recall_mean", "pred_path",
 ]
+# Appended after all existing per-case columns to preserve their order.
+PREDICTION_PATH_FIELDS = ["pred_polar_path", "pred_cartesian_path"]
+OVERLAY_PATH_FIELDS = [
+    "overlay_polar_path", "overlay_cartesian_path",
+    "overlay_polar_hard_path", "overlay_cartesian_hard_path",
+    "overlay_polar_soft_path", "overlay_cartesian_soft_path",
+    "overlay_gt_polar_path", "overlay_gt_cartesian_path", "overlay_metadata_path",
+]
+EXPORT_PATH_FIELDS = PREDICTION_PATH_FIELDS + OVERLAY_PATH_FIELDS
 
 _METRICS = ("dice", "iou", "precision", "recall")
 
@@ -148,6 +168,8 @@ class SegEvaluator:
         if include_quant:
             for key in self._quantification_case_fields(cluster_key):
                 row[key] = rec.get(key, "")
+        for key in EXPORT_PATH_FIELDS:
+            row[key] = rec.get(key, "")
         return row
 
     @staticmethod
@@ -159,6 +181,7 @@ class SegEvaluator:
         fields = PER_CASE_BASE_FIELDS + extra
         if include_quant:
             fields += [key for key in self._quantification_case_fields(cluster_key) if key not in fields]
+        fields += [key for key in EXPORT_PATH_FIELDS if key not in fields]
         return fields
 
     def _per_class_rows(self, records: List[dict]) -> List[dict]:
@@ -301,6 +324,7 @@ class SegEvaluator:
         if has_quantification_records(records):
             scalar_fields += [key for key in self._quantification_case_fields(cluster_key)
                               if key not in scalar_fields]
+        scalar_fields += [key for key in EXPORT_PATH_FIELDS if key not in scalar_fields]
         per_case_rows = []
         for r in records:
             row = {**common}
@@ -381,6 +405,7 @@ class SegEvaluator:
         case_fields = list(dict.fromkeys((
             "case_id", "patient_id", cluster_key, "image_path", "mask_path", "pred_path",
             *QUANTIFICATION_FIELDS,
+            *EXPORT_PATH_FIELDS,
         )))
         per_case = [{**common, **{key: row.get(key, "") for key in case_fields}} for row in records]
         metrics = summarize_quantification_records(

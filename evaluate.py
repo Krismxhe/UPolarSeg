@@ -18,6 +18,7 @@ from pytorch_lightning.loggers import TensorBoardLogger, CSVLogger
 
 from src.datasets.seg_dataset import SegDataModule
 from src.evaluation.prediction_masks import normalize_save_mode
+from src.evaluation.quantification_overlays import normalize_overlay_mode
 from src.metrics.evaluator import SegEvaluator
 from src.models.seg_module import SegModule
 from src.utils.io import ensure_dir, write_resolved_config
@@ -35,8 +36,10 @@ def main(cfg: DictConfig) -> None:
     split = cfg.split
     eval_cfg = cfg.get('eval', {}) or {}
     save_mode = normalize_save_mode(eval_cfg.get('save_predictions', 'none'))
-    # Resolve before testing, independently of CSV export, so every rank's mask
-    # writer and the final reports use the same destination.
+    overlay_mode = normalize_overlay_mode(eval_cfg.get('save_quantification_overlays', 'none'))
+    gt_overlay_mode = normalize_overlay_mode(eval_cfg.get('save_quantification_gt_overlays', 'none'))
+    # Resolve before testing, independently of CSV export, so every rank's
+    # writers and the final reports use the same destination.
     default_dir = os.path.join(cfg.logging.save_dir, cfg.logging.name, 'eval', split)
     output_dir = to_absolute_path(str(eval_cfg.get('output_dir', None) or default_dir))
     OmegaConf.update(cfg, 'eval.output_dir', output_dir, force_add=True)
@@ -105,9 +108,9 @@ def main(cfg: DictConfig) -> None:
         print(f'\n[INFO] Evaluation CSV written to: {output_dir}')
         for name, path in written.items():
             print(f'  {name:<10} {path}')
-    elif save_mode != 'none':
-        # A mask-only export still needs the geometry and threshold used to
-        # produce its class-index PNGs.
+    elif save_mode != 'none' or overlay_mode != 'none' or gt_overlay_mode != 'none':
+        # Image-only exports still retain their resolved geometry, prediction
+        # source, readout selection and threshold alongside the output files.
         config_path = write_resolved_config(ensure_dir(output_dir) / 'config.yaml', cfg)
         print(f'\n[INFO] Evaluation config written to: {config_path}')
 
@@ -117,6 +120,29 @@ def main(cfg: DictConfig) -> None:
             print(f"  polar      {os.path.join(output_dir, 'masks_polar')}")
         if save_mode in {'cartesian', 'both'}:
             print(f"  cartesian  {os.path.join(output_dir, 'masks_cartesian')}")
+
+    if overlay_mode != 'none':
+        print('\n[INFO] Quantification overlays written:')
+        layout = str(eval_cfg.get('quantification_overlay_layout', 'combined')).strip().lower()
+        readouts = str(eval_cfg.get('quantification_overlay_readouts', 'both')).strip().lower()
+        for space in ('polar', 'cartesian'):
+            if overlay_mode not in {space, 'both'}:
+                continue
+            directory = os.path.join(output_dir, f'overlays_{space}')
+            if layout == 'separate':
+                for kind in ('hard', 'soft'):
+                    if readouts in {kind, 'both'}:
+                        print(f"  {space} {kind:<5} {os.path.join(directory, kind)}")
+            else:
+                print(f'  {space:<10} {directory}')
+    if gt_overlay_mode != 'none':
+        print('\n[INFO] Ground-truth hard quantification overlays written:')
+        if gt_overlay_mode in {'polar', 'both'}:
+            print(f"  polar      {os.path.join(output_dir, 'overlays_gt_polar')}")
+        if gt_overlay_mode in {'cartesian', 'both'}:
+            print(f"  cartesian  {os.path.join(output_dir, 'overlays_gt_cartesian')}")
+    if overlay_mode != 'none' or gt_overlay_mode != 'none':
+        print(f"  metadata   {os.path.join(output_dir, 'overlay_metadata')}")
 
 
 if __name__ == '__main__':
